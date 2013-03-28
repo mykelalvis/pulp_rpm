@@ -13,17 +13,19 @@
 
 import os.path
 import logging
+import shutil
+from pulp_rpm.common import ids, constants
 
 _LOGGER = logging.getLogger(__name__)
 
 
-
 class Package(object):
     UNIT_KEY_NAMES = tuple()
+    TYPE = None
     def __init__(self, local_vars):
         for name in self.UNIT_KEY_NAMES:
             setattr(self, name, local_vars[name])
-        self.metadata = local_vars['metadata']
+        self.metadata = local_vars.get('metadata', {})
 
     @property
     def unit_key(self):
@@ -60,6 +62,57 @@ class Package(object):
             if name in self.UNIT_KEY_NAMES:
                 values.append(getattr(self, name))
         return ''.join(values)
+
+
+class Distribution(Package):
+    UNIT_KEY_NAMES = ('id', 'family', 'variant', 'version', 'arch')
+    TYPE = 'distribution'
+
+    def __init__(self, family, variant, version, arch):
+        kwargs = locals()
+        # I don't know why this is the "id", but am following the pattern of the
+        # original importer
+        kwargs['id'] = '-'.join(('ks', family, variant, version, arch))
+        super(Distribution, self).__init__(kwargs)
+
+    @property
+    def relative_path(self):
+        """
+        For this model, the relative path will be a directory in which all
+        related files get stored. For most unit types, this path is to one
+        file.
+        """
+        return self.id
+
+    def process_download_reports(self, reports):
+        """
+        Once downloading is complete, add information about each file to this
+        model instance. This is required before saving the new unit.
+
+        :param reports: list of successful download reports
+        :type  reports: list(pulp.common.download.report.DownloadReport)
+        """
+        _LOGGER.info([r.data for r in reports])
+        metadata_files = self.metadata.setdefault('files', [])
+        for report in reports:
+            # the following data model is mostly intended to match what the
+            # previous importer generated.
+            metadata_files.append({
+                'checksum': report.data['checksum'],
+                'checksumtype': report.data['checksumtype'],
+                'downloadurl': report.url,
+                'filename': os.path.basename(report.data['relativepath']),
+                'fileName': os.path.basename(report.data['relativepath']),
+                'item_type': ids.TYPE_ID_DISTRO,
+                'pkgpath': os.path.join(
+                    constants.DISTRIBUTION_STORAGE_PATH,
+                    self.id,
+                    os.path.dirname(report.data['relativepath']),
+                ),
+                'relativepath': report.data['relativepath'],
+                'savepath': report.destination,
+                'size': report.total_bytes,
+            })
 
 
 class DRPM(Package):
@@ -101,19 +154,3 @@ class Errata(Package):
 class PackageGroup(Package):
     UNIT_KEY_NAMES = ('id', 'repo_id')
     TYPE = 'package_group'
-
-
-type_map = {
-    RPM.TYPE: RPM,
-    DRPM.TYPE: DRPM,
-    Errata.TYPE: Errata,
-}
-
-
-def from_package_info(package_info):
-    # TODO: maybe get rid of this
-    package_type = package_info['type']
-
-    if package_type in type_map:
-        return type_map[package_type].from_package_info(package_info)
-
