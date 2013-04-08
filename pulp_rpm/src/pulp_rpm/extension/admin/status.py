@@ -113,51 +113,9 @@ class RpmStatusRenderer(StatusRenderer):
         self.distribution_sync_last_state = state
 
     def render_download_step(self, progress_report):
-
-        # Example Data:
-        # "content": {
-        #    "num_success": 21,
-        #    "size_total": 3871257,
-        #    "items_left": 0,
-        #    "items_total": 21,
-        #    "state": "FINISHED",
-        #    "size_left": 0,
-        #    "details": {
-        #        "tree_file": {
-        #            "num_success": 0,
-        #            "size_total": 0,
-        #            "items_left": 0,
-        #            "items_total": 0,
-        #            "size_left": 0,
-        #            "num_error": 0
-        #        },
-        #        "rpm": {
-        #            "num_success": 21,
-        #            "size_total": 3871257,
-        #            "items_left": 0,
-        #            "items_total": 21,
-        #            "size_left": 0,
-        #            "num_error": 0
-        #        },
-        #        "delta_rpm": {
-        #            "num_success": 0,
-        #            "size_total": 0,
-        #            "items_left": 0,
-        #            "items_total": 0,
-        #            "size_left": 0,
-        #            "num_error": 0
-        #        },
-        #        "file": {
-        #            "num_success": 0,
-        #            "size_total": 0,
-        #            "items_left": 0,
-        #            "items_total": 0,
-        #            "size_left": 0,
-        #            "num_error": 0
-        #        }
-        #    },
-        # }
-
+        """
+        :type  progress_report: pulp_rpm.plugins.importers.yum.report.ContentReport
+        """
         data = progress_report['yum_importer']['content']
         state = data['state']
 
@@ -247,8 +205,10 @@ class RpmStatusRenderer(StatusRenderer):
         #    "state": "FINISHED",
         #    "num_errata": 0
         # }
-
         current_state = progress_report['yum_importer']['errata']['state']
+        if current_state in (constants.STATE_NOT_STARTED, constants.STATE_SKIPPED):
+            return
+
         def update_func(new_state):
             self.errata_last_state = new_state
         render_general_spinner_step(self.prompt, self.errata_spinner, current_state, self.errata_last_state, _('Importing errata...'), update_func)

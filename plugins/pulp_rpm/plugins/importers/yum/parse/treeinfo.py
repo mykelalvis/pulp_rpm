@@ -32,21 +32,23 @@ SECTION_CHECKSUMS = 'checksums'
 _LOGGER = logging.getLogger(__name__)
 
 
-def main(sync_conduit, feed, working_dir, report, progress_callback):
+def sync(sync_conduit, feed, working_dir, report, progress_callback):
     # this temporary dir will hopefully be moved to the unit's storage path
     # if all downloads go well. If not, it will be deleted below, ensuring a
     # complete cleanup
     tmp_dir = tempfile.mkdtemp(dir=working_dir)
+    _LOGGER.info('tmp dir: ' + tmp_dir)
     try:
         treefile_path = get_treefile(feed, tmp_dir)
         if not treefile_path:
-            # no tree file found
+            _LOGGER.debug('no treefile found')
             report['state'] = constants.STATE_COMPLETE
             return
 
         try:
             model, files = parse_treefile(treefile_path)
         except ValueError:
+            _LOGGER.error('could not parse treefile')
             report['state'] = constants.STATE_FAILED
             return
 
@@ -54,10 +56,10 @@ def main(sync_conduit, feed, working_dir, report, progress_callback):
         config = DownloaderConfig()
         listener = DistroFileListener(report, progress_callback)
         downloader = HTTPCurlDownloader(config, listener)
+        _LOGGER.debug('downloading distribution files')
         downloader.download(file_to_download_request(f, feed, tmp_dir) for f in files)
         if len(listener.failed_reports) == 0:
             unit = sync_conduit.init_unit(ids.TYPE_ID_DISTRO, model.unit_key, model.metadata, model.relative_path)
-            _LOGGER.info(unit.storage_path)
             model.process_download_reports(listener.succeeded_reports)
             # remove pre-existing dir
             shutil.rmtree(unit.storage_path, ignore_errors=True)
@@ -66,7 +68,8 @@ def main(sync_conduit, feed, working_dir, report, progress_callback):
             os.chmod(unit.storage_path, 0o775)
             sync_conduit.save_unit(unit)
         else:
-            # TODO: log something?
+            _LOGGER.error('some distro file downloads failed')
+            # TODO: log something more useful, and report errors
             report['state'] = constants.STATE_FAILED
             return
         report['state'] = constants.STATE_COMPLETE
@@ -123,7 +126,11 @@ def parse_treefile(path):
     """
     parser = ConfigParser.RawConfigParser()
     with open(path) as open_file:
-        parser.readfp(open_file)
+        try:
+            parser.readfp(open_file)
+        except ConfigParser.ParsingError:
+            # wouldn't need this if ParsingError subclassed ValueError.
+            raise ValueError('could not parse treeinfo file')
     try:
         model = models.Distribution(
             parser.get(SECTION_GENERAL, 'family'),
@@ -147,15 +154,16 @@ def parse_treefile(path):
                 'checksum': checksum,
                 'checksumtype': checksumtype
             }
-    if parser.has_section(SECTION_STAGE2):
-        for item in parser.items(SECTION_STAGE2):
-            if item[0] not in files:
-                relativepath = item[0]
-                files[relativepath] = {
-                    'relativepath': relativepath,
-                    'checksum': None,
-                    'checksumtype': None,
-                }
-    # TODO: look at "images-*" sections
+
+    for section_name in parser.sections():
+        if section_name.startswith('images-') or section_name == SECTION_STAGE2:
+            for item in parser.items(section_name):
+                if item[1] not in files:
+                    relativepath = item[1]
+                    files[relativepath] = {
+                        'relativepath': relativepath,
+                        'checksum': None,
+                        'checksumtype': None,
+                    }
 
     return model, files.values()

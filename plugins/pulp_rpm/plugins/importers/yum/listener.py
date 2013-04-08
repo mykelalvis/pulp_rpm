@@ -27,10 +27,22 @@ class DistroFileListener(AggregatingEventListener):
         self.progress_callback = progress_callback
 
     def download_succeeded(self, report):
+        """
+
+        :param report:
+        :type  report: pulp.common.download.report.DownloadReport
+        :return:
+        """
         self._decrement()
         super(DistroFileListener, self).download_succeeded(report)
 
     def download_failed(self, report):
+        """
+
+        :param report:
+        :type  report: pulp.common.download.report.DownloadReport
+        :return:
+        """
         self._decrement()
         super(DistroFileListener, self).download_succeeded(report)
 

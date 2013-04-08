@@ -12,48 +12,19 @@
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 import functools
-import gzip
 import logging
-import lzma
 import shutil
 import tempfile
 
 from pulp.plugins.model import SyncReport
 
 from pulp_rpm.common import constants
-from pulp_rpm.plugins.importers.download import metadata, primary, packages, presto, updateinfo
+from pulp_rpm.plugins.importers.yum.repomd import metadata, primary, packages, updateinfo, presto, group
 from pulp_rpm.plugins.importers.yum.listener import ContentListener
 from pulp_rpm.plugins.importers.yum.parse import treeinfo
 from pulp_rpm.plugins.importers.yum.report import ContentReport, DistributionReport
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _get_metadata_file_handle(name, metadata_files):
-    """
-    Given a standard name for a metadata file, as appears in a repomd.xml file
-    as a "data" element's "type", return an open file handle in read mode for
-    that file.
-
-    :param metadata_files:  Object representing all of the discovered metadata
-                            files for the repository currently being operated
-                            on
-    :type  metadata_files:  pulp_rpm.plugins.importers.download.metadata.MetadataFiles
-
-    :return: file
-    """
-    try:
-        file_path = metadata_files.metadata[name]['local_path']
-    except KeyError:
-        return
-
-    if file_path.endswith('.gz'):
-        file_handle = gzip.open(file_path, 'r')
-    elif file_path.endswith('.xz'):
-        file_handle = lzma.LZMAFile(file_path, 'r')
-    else:
-        file_handle = open(file_path, 'r')
-    return file_handle
 
 
 class RepoSync(object):
@@ -74,7 +45,7 @@ class RepoSync(object):
         self.config = config
         self.feed = config.get(constants.CONFIG_FEED_URL)
         self.current_units = sync_conduit.get_units()
-        self.set_progress = functools.partial(self.sync_conduit.set_progress, self.progress_status)
+        self.repo = repo
 
     def run(self):
         # using this tmp dir ensures that cleanup leaves nothing behind, since
@@ -95,13 +66,19 @@ class RepoSync(object):
 
             self.distribution_report['state'] = constants.STATE_RUNNING
             self.set_progress()
-            treeinfo.main(self.sync_conduit, self.feed, self.tmp_dir, self.distribution_report, self.set_progress)
+            treeinfo.sync(self.sync_conduit, self.feed, self.tmp_dir, self.distribution_report, self.set_progress)
             self.set_progress()
 
             self.progress_status['errata']['state'] = constants.STATE_RUNNING
             self.set_progress()
             self.get_errata(metadata_files)
             self.progress_status['errata']['state'] = constants.STATE_COMPLETE
+            self.set_progress()
+
+            self.progress_status['comps']['state'] = constants.STATE_RUNNING
+            self.set_progress()
+            self.get_groups(metadata_files)
+            self.progress_status['comps']['state'] = constants.STATE_COMPLETE
             self.set_progress()
 
         finally:
@@ -112,27 +89,24 @@ class RepoSync(object):
     def get_metadata(self):
         """
 
-        :param feed:
-        :param tmp_dir:
         :return:
         :rtype:  pulp_rpm.plugins.importers.download.metadata.MetadataFiles
         """
-        self.set_progress()
-
         metadata_files = metadata.MetadataFiles(self.feed, self.tmp_dir)
         metadata_files.download_repomd()
         metadata_files.parse_repomd()
         metadata_files.download_metadata_files()
+        # TODO: verify metadata
         #metadata_files.verify_metadata_files()
         return metadata_files
 
     def get_content(self, metadata_files):
-        rpms_to_download, drpms_to_download = self.decide_what_to_download(metadata_files)
+        rpms_to_download, drpms_to_download = self._decide_what_to_download(metadata_files)
         self.download(metadata_files, rpms_to_download, drpms_to_download)
 
-    def decide_what_to_download(self, metadata_files):
-        rpms_to_download, rpms_count, rpms_total_size = self.decide_rpms_to_download(metadata_files)
-        drpms_to_download, drpms_count, drpms_total_size = self.decide_drpms_to_download(metadata_files)
+    def _decide_what_to_download(self, metadata_files):
+        rpms_to_download, rpms_count, rpms_total_size = self._decide_rpms_to_download(metadata_files)
+        drpms_to_download, drpms_count, drpms_total_size = self._decide_drpms_to_download(metadata_files)
 
         unit_counts = {
             'rpm': rpms_count,
@@ -143,23 +117,23 @@ class RepoSync(object):
         self.set_progress()
         return rpms_to_download, drpms_to_download
 
-    def decide_rpms_to_download(self, metadata_files):
-        primary_file_handle = _get_metadata_file_handle('primary', metadata_files)
+    def _decide_rpms_to_download(self, metadata_files):
+        primary_file_handle = metadata_files.get_metadata_file_handle('primary')
         with primary_file_handle:
             # scan through all the metadata to decide which packages to download
             package_info_generator = packages.package_list_generator(primary_file_handle,
                                                                      primary.PACKAGE_TAG,
                                                                      primary.process_package_element)
-            return self.first_sweep(package_info_generator, self.current_units)
+            return self._identify_wanted_packages(package_info_generator, self.current_units)
 
-    def decide_drpms_to_download(self, metadata_files):
-        presto_file_handle = _get_metadata_file_handle('prestodelta', metadata_files)
+    def _decide_drpms_to_download(self, metadata_files):
+        presto_file_handle = metadata_files.get_metadata_file_handle('prestodelta')
         if presto_file_handle:
             with presto_file_handle:
                 package_info_generator = packages.package_list_generator(presto_file_handle,
                                                                          presto.PACKAGE_TAG,
                                                                          presto.process_package_element)
-                drpms_to_download, drpms_count, drpms_total_size = self.first_sweep(package_info_generator, self.current_units)
+                drpms_to_download, drpms_count, drpms_total_size = self._identify_wanted_packages(package_info_generator, self.current_units)
         else:
             drpms_to_download = []
             drpms_count = 0
@@ -169,17 +143,17 @@ class RepoSync(object):
     def download(self, metadata_files, rpms_to_download, drpms_to_download):
         # TODO: probably should make this more generic
         event_listener = ContentListener(self.sync_conduit, self.progress_status)
-        primary_file_handle = _get_metadata_file_handle('primary', metadata_files)
+        primary_file_handle = metadata_files.get_metadata_file_handle('primary')
         with primary_file_handle:
             package_info_generator = packages.package_list_generator(primary_file_handle,
                                                                      primary.PACKAGE_TAG,
                                                                      primary.process_package_element)
             units_to_download = self._filtered_unit_generator(package_info_generator, rpms_to_download)
 
-            packages_manager = packages.Packages(self.feed, units_to_download, self.tmp_dir, event_listener)
-            packages_manager.download_packages()
+            packages_downloader = packages.Packages(self.feed, units_to_download, self.tmp_dir, event_listener)
+            packages_downloader.download_packages()
 
-        presto_file_handle = _get_metadata_file_handle('prestodelta', metadata_files)
+        presto_file_handle = metadata_files.get_metadata_file_handle('prestodelta')
         if presto_file_handle:
             with presto_file_handle:
                 package_info_generator = packages.package_list_generator(presto_file_handle,
@@ -187,21 +161,14 @@ class RepoSync(object):
                                                                          presto.process_package_element)
                 units_to_download = self._filtered_unit_generator(package_info_generator, drpms_to_download)
 
-                packages_manager = packages.Packages(self.feed, units_to_download, self.tmp_dir, event_listener)
-                packages_manager.download_packages()
-
-        self.progress_status['content']['state'] = constants.STATE_COMPLETE
-        self.progress_status['errata']['state'] = constants.STATE_RUNNING
-        self.set_progress()
-
-        self.progress_status['comps']['state'] = constants.STATE_SKIPPED
-        self.set_progress()
+                packages_downloader = packages.Packages(self.feed, units_to_download, self.tmp_dir, event_listener)
+                packages_downloader.download_packages()
 
         report = self.sync_conduit.build_success_report({}, {})
         return report
 
     def get_errata(self, metadata_files):
-        errata_file_handle = _get_metadata_file_handle('updateinfo', metadata_files)
+        errata_file_handle = metadata_files.get_metadata_file_handle('updateinfo')
         if not errata_file_handle:
             return
         with errata_file_handle:
@@ -212,7 +179,30 @@ class RepoSync(object):
                 unit = self.sync_conduit.init_unit(model.TYPE, model.unit_key, model.metadata, None)
                 self.sync_conduit.save_unit(unit)
 
-    def first_sweep(self, package_info_generator, current_units):
+    def get_groups(self, metadata_files):
+        group_file_handle = None
+        try:
+            group_file_handle = metadata_files.get_metadata_file_handle('group_gz')
+        except KeyError:
+            pass
+        if group_file_handle is None:
+            try:
+                group_file_handle = metadata_files.get_metadata_file_handle('group')
+            except KeyError:
+                pass
+        if group_file_handle is None:
+        # TODO: log something?
+            return
+        process_func = functools.partial(group.process_package_element, self.repo.id)
+        with group_file_handle:
+            package_info_generator = packages.package_list_generator(group_file_handle,
+                                                                     group.PACKAGE_TAG,
+                                                                     process_func)
+            for model in package_info_generator:
+                unit = self.sync_conduit.init_unit(model.TYPE, model.unit_key, model.metadata, None)
+                self.sync_conduit.save_unit(unit)
+
+    def _identify_wanted_packages(self, package_info_generator, current_units):
         """
         Given an iterator of Package instances available for download, and a list
         of units currently in the repo, scan through the Packages to decide which
@@ -237,5 +227,5 @@ class RepoSync(object):
 
     def _filtered_unit_generator(self, units, to_download):
         for unit in units:
-            # decide if this unit should be downloaded
+            # TODO: decide if this unit should be downloaded
             yield unit
