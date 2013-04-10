@@ -14,6 +14,7 @@
 from copy import deepcopy
 import gzip
 import hashlib
+import logging
 import lzma
 import os
 from urlparse import urljoin
@@ -23,6 +24,9 @@ from xml.etree.cElementTree import iterparse
 from pulp.common.download.downloaders.curl import HTTPSCurlDownloader
 from pulp.common.download.config import DownloaderConfig
 from pulp.common.download.request import DownloadRequest
+
+
+_LOGGER = logging.getLogger(__name__)
 
 # repomd.xml element tags ------------------------------------------------------
 
@@ -209,6 +213,12 @@ class MetadataFiles(object):
         else:
             file_handle = open(file_path, 'r')
         return file_handle
+
+    def get_group_file_handle(self):
+        group_file_handle = self.get_metadata_file_handle('group_gz')
+        if group_file_handle is None:
+            group_file_handle = self.get_metadata_file_handle('group')
+        return group_file_handle
 
 
 # utilities --------------------------------------------------------------------

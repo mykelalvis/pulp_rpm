@@ -13,8 +13,7 @@
 
 import os.path
 import logging
-import shutil
-from pulp_rpm.common import ids, constants
+from pulp_rpm.common import constants, version_utils
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,9 +48,14 @@ class Package(object):
 
         return cls(**unit_key)
 
+    def __str__(self):
+        return '%s: %s' % (self.TYPE, '-'.join(getattr(self, name) for name in self.UNIT_KEY_NAMES))
+
+
+class VersionedPackage(Package):
     @property
     def key_string_without_version(self):
-        keys = [key for key in self.UNIT_KEY_NAMES if key not in ['epoch', 'version', 'release']]
+        keys = [getattr(self, key) for key in self.UNIT_KEY_NAMES if key not in ['epoch', 'version', 'release', 'checksum', 'checksumtype']]
         keys.append(self.TYPE)
         return '-'.join(keys)
 
@@ -61,7 +65,17 @@ class Package(object):
         for name in ('epoch', 'version', 'release'):
             if name in self.UNIT_KEY_NAMES:
                 values.append(getattr(self, name))
-        return ''.join(values)
+        return tuple(values)
+
+    @property
+    def complete_version_serialized(self):
+        return tuple(version_utils.encode(field) for field in self.complete_version)
+
+    def __cmp__(self, other):
+        return cmp(
+            self.complete_version_serialized,
+            other.complete_version_serialized
+        )
 
 
 class Distribution(Package):
@@ -103,7 +117,7 @@ class Distribution(Package):
                 'downloadurl': report.url,
                 'filename': os.path.basename(report.data['relativepath']),
                 'fileName': os.path.basename(report.data['relativepath']),
-                'item_type': ids.TYPE_ID_DISTRO,
+                'item_type': self.TYPE,
                 'pkgpath': os.path.join(
                     constants.DISTRIBUTION_STORAGE_PATH,
                     self.id,
@@ -115,7 +129,7 @@ class Distribution(Package):
             })
 
 
-class DRPM(Package):
+class DRPM(VersionedPackage):
     UNIT_KEY_NAMES = ('epoch',  'version', 'release', 'filename', 'checksumtype', 'checksum')
     TYPE = 'drpm'
 
@@ -127,7 +141,7 @@ class DRPM(Package):
         return self.filename
 
 
-class RPM(Package):
+class RPM(VersionedPackage):
     UNIT_KEY_NAMES = ('name', 'epoch', 'version', 'release', 'arch', 'checksumtype', 'checksum')
     TYPE = 'rpm'
 
@@ -154,6 +168,14 @@ class Errata(Package):
 class PackageGroup(Package):
     UNIT_KEY_NAMES = ('id', 'repo_id')
     TYPE = 'package_group'
+
+    def __init__(self, id, repo_id, metadata):
+        Package.__init__(self, locals())
+
+
+class PackageCategory(Package):
+    UNIT_KEY_NAMES = ('id', 'repo_id')
+    TYPE = 'package_category'
 
     def __init__(self, id, repo_id, metadata):
         Package.__init__(self, locals())
