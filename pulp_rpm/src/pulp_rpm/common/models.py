@@ -10,6 +10,7 @@
 # NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
 # have received a copy of GPLv2 along with this software; if not, see
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
+from collections import namedtuple
 
 import os.path
 import logging
@@ -27,11 +28,31 @@ class Package(object):
         self.metadata = local_vars.get('metadata', {})
 
     @property
+    def NAMEDTUPLE(self):
+        """
+
+        :return:
+        :rtype collections.namedtuple
+        """
+        if getattr(self, '__NAMEDTUPLE', None) is None:
+            self.__NAMEDTUPLE = namedtuple(self.TYPE, self.UNIT_KEY_NAMES)
+        return self.__NAMEDTUPLE
+
+    @property
     def unit_key(self):
         key = {}
         for name in self.UNIT_KEY_NAMES:
             key[name] = getattr(self, name)
         return key
+
+    @property
+    def as_named_tuple(self):
+        """
+
+        :return:
+        :rtype collections.namedtuple
+        """
+        return self.NAMEDTUPLE(**self.unit_key)
 
     @classmethod
     def from_package_info(cls, package_info):
@@ -140,6 +161,10 @@ class DRPM(VersionedPackage):
     def relative_path(self):
         return self.filename
 
+    @property
+    def download_path(self):
+        return self.filename
+
 
 class RPM(VersionedPackage):
     UNIT_KEY_NAMES = ('name', 'epoch', 'version', 'release', 'arch', 'checksumtype', 'checksum')
@@ -155,6 +180,10 @@ class RPM(VersionedPackage):
             unit_key['name'], unit_key['version'], unit_key['release'],
             unit_key['arch'], unit_key['checksum'], self.metadata['relative_url_path']
         )
+
+    @property
+    def download_path(self):
+        return self.metadata['relative_url_path']
 
 
 class Errata(Package):
@@ -179,3 +208,26 @@ class PackageCategory(Package):
 
     def __init__(self, id, repo_id, metadata):
         Package.__init__(self, locals())
+
+
+TYPE_MAP = {
+    Distribution.TYPE: Distribution,
+    DRPM.TYPE: DRPM,
+    Errata.TYPE: Errata,
+    PackageCategory.TYPE: PackageCategory,
+    PackageGroup.TYPE: PackageGroup,
+    RPM.TYPE: RPM,
+}
+
+
+def from_typed_unit_key_tuple(typed_tuple):
+    """
+    This assumes that the __init__ method takes unit key arguments in order
+    followed by a dictionary for other metadata.
+
+    :param typed_tuple:
+    :return:
+    """
+    package_class = TYPE_MAP[typed_tuple[0]]
+    args = typed_tuple[1:]
+    return package_class.from_package_info(*args, metadata={})
