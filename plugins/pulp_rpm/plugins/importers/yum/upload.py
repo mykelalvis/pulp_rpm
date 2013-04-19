@@ -10,14 +10,16 @@
 # NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
 # have received a copy of GPLv2 along with this software; if not, see
 # http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-import logging
-from pulp_rpm.common import constants
-
-_LOGGER = logging.getLogger(__name__)
+from pulp_rpm.common import models
 
 
-class Config(object):
-    def __init__(self, platform_config):
-        self.feed = platform_config.get(constants.CONFIG_FEED_URL)
-        self.newest = platform_config.get_boolean(constants.CONFIG_NEWEST) or False
+def upload(repo, type_id, unit_key, metadata, file_path, conduit, config):
+    model_type = models.TYPE_MAP[type_id]
+    # get metadata
+    # init unit
+    # copy file to destination
+    # save unit
+
+
+def metadata_rpm(file_path):
+    return {}
