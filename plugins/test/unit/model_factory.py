@@ -25,6 +25,7 @@ _group_counter = count()
 _category_counter = count()
 _yum_md_file_counter = count()
 _errata_counter = count()
+_distribution_counter = count()
 
 
 def as_units(f):
@@ -178,3 +179,17 @@ def errata_models(num):
 @as_units
 def errata_units(num):
     return errata_models(num)
+
+
+def distribution_models(num):
+    ret = []
+    count = _distribution_counter.next()
+    for i in range(num):
+        ret.append(models.Distribution('RHEL Family', 'Server', '6.%d' % count,
+                                       'x86_64', {}))
+    return ret
+
+
+@as_units
+def distribution_units(num):
+    return distribution_models(num)

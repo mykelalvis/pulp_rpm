@@ -151,9 +151,11 @@ def parse_treefile(path):
     by the standard library's ConfigParser.
 
     :param path:    full path to the treefile
+    :type  path:    basestring
     :return:        instance of Distribution model, and a list of dicts
                     describing the distribution's files
     :rtype:         (pulp_rpm.common.models.Distribution, dict)
+    :raise:         ValueError
     """
     parser = ConfigParser.RawConfigParser()
     # the default implementation of this method makes all option names lowercase,
