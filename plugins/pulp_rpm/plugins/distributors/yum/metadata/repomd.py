@@ -1,49 +1,26 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software;
-# if not, see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
 import gzip
-import hashlib
 import os
 import time
 from xml.etree import ElementTree
 
+from pulp_rpm.common.constants import CONFIG_DEFAULT_CHECKSUM
 from pulp_rpm.plugins.distributors.yum.metadata.metadata import (
-    MetadataFileContext, REPO_DATA_DIR_NAME)
+    MetadataFileContext, REPO_DATA_DIR_NAME, REPOMD_FILE_NAME)
+
 from pulp_rpm.yum_plugin import util
 
 
 _LOG = util.getLogger(__name__)
-
-HASHLIB_ALGORITHMS = ('md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512')
-
-REPOMD_FILE_NAME = 'repomd.xml'
-
-DEFAULT_CHECKSUM_TYPE = 'sha256'
 
 REPO_XML_NAME_SPACE = 'http://linux.duke.edu/metadata/repo'
 RPM_XML_NAME_SPACE = 'http://linux.duke.edu/metadata/rpm'
 
 
 class RepomdXMLFileContext(MetadataFileContext):
-
-    def __init__(self, working_dir, checksum_type=DEFAULT_CHECKSUM_TYPE):
-        assert checksum_type in HASHLIB_ALGORITHMS
+    def __init__(self, working_dir, checksum_type=CONFIG_DEFAULT_CHECKSUM):
 
         metadata_file_path = os.path.join(working_dir, REPO_DATA_DIR_NAME, REPOMD_FILE_NAME)
-        super(RepomdXMLFileContext, self).__init__(metadata_file_path)
-
-        self.checksum_type = checksum_type
-        self.checksum_constructor = getattr(hashlib, checksum_type)
+        super(RepomdXMLFileContext, self).__init__(metadata_file_path, checksum_type)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
 
@@ -82,7 +59,7 @@ class RepomdXMLFileContext(MetadataFileContext):
 
         self._write_root_tag_close = _write_root_tag_close_closure
 
-    def add_metadata_file_metadata(self, data_type, file_path):
+    def add_metadata_file_metadata(self, data_type, file_path, precalculated_checksum=None):
 
         file_name = os.path.basename(file_path)
 
@@ -94,11 +71,13 @@ class RepomdXMLFileContext(MetadataFileContext):
         data_attributes = {'type': data_type}
         data_element = ElementTree.Element('data', data_attributes)
 
-        location_element = ElementTree.SubElement(data_element, 'location')
-        location_element.text = os.path.join(REPO_DATA_DIR_NAME, file_name)
+        location_attributes = {'href': os.path.join(REPO_DATA_DIR_NAME, file_name)}
+        ElementTree.SubElement(data_element, 'location', location_attributes)
 
         timestamp_element = ElementTree.SubElement(data_element, 'timestamp')
-        timestamp_element.text = str(os.path.getmtime(file_path))
+        # Convert the float mtime to an integer before stringifying since
+        # yum will ignore timestamps that are floats
+        timestamp_element.text = str(int(os.path.getmtime(file_path)))
 
         size_element = ElementTree.SubElement(data_element, 'size')
         size_element.text = str(os.path.getsize(file_path))
@@ -106,16 +85,22 @@ class RepomdXMLFileContext(MetadataFileContext):
         checksum_attributes = {'type': self.checksum_type}
         checksum_element = ElementTree.SubElement(data_element, 'checksum', checksum_attributes)
 
-        with open(file_path, 'rb') as file_handle:
-            content = file_handle.read()
-            checksum_element.text = self.checksum_constructor(content).hexdigest()
+        # if checksum is calculated in the individual repodata file's context, use it instead of
+        # calculating it again.
+        if precalculated_checksum is None:
+            with open(file_path, 'rb') as file_handle:
+                content = file_handle.read()
+                checksum_element.text = self.checksum_constructor(content).hexdigest()
+        else:
+            checksum_element.text = precalculated_checksum
 
         if file_path.endswith('.gz'):
 
             open_size_element = ElementTree.SubElement(data_element, 'open-size')
 
             open_checksum_attributes = {'type': self.checksum_type}
-            open_checksum_element = ElementTree.SubElement(data_element, 'open-checksum', open_checksum_attributes)
+            open_checksum_element = ElementTree.SubElement(data_element, 'open-checksum',
+                                                           open_checksum_attributes)
 
             try:
                 file_handle = gzip.open(file_path, 'r')
@@ -140,5 +125,3 @@ class RepomdXMLFileContext(MetadataFileContext):
         _LOG.debug('Writing repomd metadata:\n' + data_element_string)
 
         self.metadata_file_handle.write(data_element_string + '\n')
-
-

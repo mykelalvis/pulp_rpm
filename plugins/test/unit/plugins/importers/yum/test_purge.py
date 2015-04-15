@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from cStringIO import StringIO
 import unittest
 import functools
@@ -26,10 +13,11 @@ from pulp.server.db.model.criteria import UnitAssociationCriteria
 from pulp.server.managers import factory as manager_factory
 from pulp.server.managers.repo.unit_association import OWNER_TYPE_IMPORTER
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum import purge
 from pulp_rpm.plugins.importers.yum.repomd import metadata, primary, presto, updateinfo, group
 import model_factory
+
 
 manager_factory.initialize()
 
@@ -55,7 +43,7 @@ class TestRemoveMissing(TestPurgeBase):
         common_named_tuple = models.RPM.NAMEDTUPLE(**common_unit.unit_key)
         remote_named_tuples.add(common_named_tuple)
 
-        purge.remove_missing_units(self.conduit, models.RPM,remote_named_tuples)
+        purge.remove_missing_units(self.conduit, models.RPM, remote_named_tuples)
 
         mock_get_existing.assert_called_once_with(models.RPM, self.conduit.get_units)
         self.conduit.remove_unit.assert_called_once_with(mock_get_existing.return_value[0])
@@ -74,13 +62,16 @@ class TestRemoveMissing(TestPurgeBase):
     @mock.patch.object(purge, 'get_remote_units', autospec=True)
     @mock.patch.object(purge, 'remove_missing_units', autospec=True)
     def test_remove_missing_drpms(self, mock_remove, mock_get_remote_units):
+        """
+        Test that the purge makes the appropriate calls and that it calls
+        for both of the prestodelta files
+        """
         purge.remove_missing_drpms(self.metadata_files, self.conduit)
 
-        mock_get_remote_units.assert_called_once_with(ANY,
-                                                      presto.PACKAGE_TAG,
-                                                      presto.process_package_element)
-        mock_remove.assert_called_once_with(self.conduit,
-                                            models.DRPM, mock_get_remote_units.return_value)
+        mock_get_remote_units.assert_called_with(ANY, presto.PACKAGE_TAG,
+                                                 presto.process_package_element)
+        self.assertEquals(2, mock_get_remote_units.call_count)
+        mock_remove.assert_called_once_with(self.conduit, models.DRPM, set())
 
     @mock.patch.object(purge, 'get_remote_units', autospec=True)
     @mock.patch.object(purge, 'remove_missing_units', autospec=True)
@@ -109,7 +100,8 @@ class TestRemoveMissing(TestPurgeBase):
 
         mock_get_remote_units.assert_called_once_with(ANY, group.CATEGORY_TAG, ANY)
         mock_remove.assert_called_once_with(self.conduit,
-                                            models.PackageCategory, mock_get_remote_units.return_value)
+                                            models.PackageCategory,
+                                            mock_get_remote_units.return_value)
 
     @mock.patch.object(purge, 'get_remote_units', autospec=True)
     @mock.patch.object(purge, 'remove_missing_units', autospec=True)
@@ -143,6 +135,7 @@ class TestGetExistingUnits(TestPurgeBase):
 
 class TestGetRemoteUnits(TestPurgeBase):
     FAKE_TYPE = 'fake_type'
+
     def setUp(self):
         super(TestGetRemoteUnits, self).setUp()
         self.metadata_files.metadata[self.FAKE_TYPE] = {'local_path': '/a/b/c'}
@@ -153,14 +146,17 @@ class TestGetRemoteUnits(TestPurgeBase):
 
         self.assertEqual(ret, set())
 
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     @mock.patch('__builtin__.open', autospec=True)
     def test_rpm(self, mock_open, mock_package_list_generator):
         rpms = model_factory.rpm_models(2)
         mock_package_list_generator.return_value = rpms
         fake_file = StringIO()
         mock_open.return_value = fake_file
-        process_func = lambda x: x
+
+        def process_func(x):
+            return x
         file_function = functools.partial(self.metadata_files.get_metadata_file_handle,
                                           self.FAKE_TYPE)
         ret = purge.get_remote_units(file_function, 'bar', process_func)
@@ -208,7 +204,8 @@ class TestRemoveOldVersions(TestPurgeBase):
     def test_srpm_one(self):
         self.conduit.get_units = mock.MagicMock(
             spec_set=self.conduit.get_units,
-            side_effect=lambda criteria: self.srpms if models.SRPM.TYPE in criteria.type_ids else [])
+            side_effect=lambda criteria: self.srpms if models.SRPM.TYPE in criteria.type_ids else []
+        )
         self.conduit.remove_unit = mock.MagicMock(spec_set=self.conduit.remove_unit)
 
         purge.remove_old_versions(1, self.conduit)
@@ -220,7 +217,8 @@ class TestRemoveOldVersions(TestPurgeBase):
     def test_srpm_two(self):
         self.conduit.get_units = mock.MagicMock(
             spec_set=self.conduit.get_units,
-            side_effect=lambda criteria: self.srpms if models.SRPM.TYPE in criteria.type_ids else [])
+            side_effect=lambda criteria: self.srpms if models.SRPM.TYPE in criteria.type_ids else []
+        )
         self.conduit.remove_unit = mock.MagicMock(spec_set=self.conduit.remove_unit)
 
         purge.remove_old_versions(2, self.conduit)
@@ -230,7 +228,8 @@ class TestRemoveOldVersions(TestPurgeBase):
     def test_drpm_one(self):
         self.conduit.get_units = mock.MagicMock(
             spec_set=self.conduit.get_units,
-            side_effect=lambda criteria: self.drpms if models.DRPM.TYPE in criteria.type_ids else [])
+            side_effect=lambda criteria: self.drpms if models.DRPM.TYPE in criteria.type_ids else []
+        )
         self.conduit.remove_unit = mock.MagicMock(spec_set=self.conduit.remove_unit)
 
         purge.remove_old_versions(1, self.conduit)
@@ -242,7 +241,8 @@ class TestRemoveOldVersions(TestPurgeBase):
     def test_drpm_two(self):
         self.conduit.get_units = mock.MagicMock(
             spec_set=self.conduit.get_units,
-            side_effect=lambda criteria: self.drpms if models.DRPM.TYPE in criteria.type_ids else [])
+            side_effect=lambda criteria: self.drpms if models.DRPM.TYPE in criteria.type_ids else []
+        )
         self.conduit.remove_unit = mock.MagicMock(spec_set=self.conduit.remove_unit)
 
         purge.remove_old_versions(2, self.conduit)
@@ -268,8 +268,8 @@ class TestPurgeUnwantedUnits(TestPurgeBase):
     @mock.patch.object(purge, 'remove_missing_groups', autospec=True)
     @mock.patch.object(purge, 'remove_missing_categories', autospec=True)
     def test_remove_missing_true(self, mock_remove_categories, mock_remove_groups,
-                                  mock_remove_errata, mock_remove_drpms, mock_remove_rpms,
-                                  mock_remove_environments):
+                                 mock_remove_errata, mock_remove_drpms, mock_remove_rpms,
+                                 mock_remove_environments):
         self.config.plugin_config[importer_constants.KEY_UNITS_REMOVE_MISSING] = True
 
         purge.purge_unwanted_units(self.metadata_files, self.conduit, self.config)

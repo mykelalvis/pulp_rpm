@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import copy
 import logging
 import os
@@ -18,9 +5,11 @@ import shutil
 
 from pulp.server.db.model.criteria import UnitAssociationCriteria
 
-from pulp_rpm.common import models, constants
+from pulp_rpm.common import constants
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum import depsolve
 from pulp_rpm.plugins.importers.yum import existing
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,8 +48,9 @@ def associate(source_repo, dest_repo, import_conduit, config, units=None):
     # allow garbage collection
     units = None
 
-    associated_units |= copy_rpms((unit for unit in associated_units if unit.type_id == models.RPM.TYPE),
-              import_conduit, recursive)
+    associated_units |= copy_rpms(
+        (unit for unit in associated_units if unit.type_id == models.RPM.TYPE),
+        import_conduit, recursive)
 
     # return here if we shouldn't get child units
     if not recursive:
@@ -73,7 +63,8 @@ def associate(source_repo, dest_repo, import_conduit, config, units=None):
                                              unit_filters={'id': {'$in': list(group_ids)}})
     group_units = list(import_conduit.get_source_units(group_criteria))
     if group_units:
-        associated_units |= set(associate(source_repo, dest_repo, import_conduit, config, group_units))
+        associated_units |= set(
+            associate(source_repo, dest_repo, import_conduit, config, group_units))
 
     # ------ get RPM children of errata ------
     wanted_rpms = get_rpms_to_copy_by_key(rpm_search_dicts, import_conduit)
@@ -113,7 +104,8 @@ def get_rpms_to_copy_by_key(rpm_search_dicts, import_conduit):
 
     # identify which of those RPMs already exist
     existing_units = existing.get_existing_units(rpm_search_dicts, models.RPM.UNIT_KEY_NAMES,
-                                models.RPM.TYPE, import_conduit.get_destination_units)
+                                                 models.RPM.TYPE,
+                                                 import_conduit.get_destination_units)
     # remove units that already exist in the destination from the set of units
     # we want to copy
     for unit in existing_units:
@@ -153,18 +145,18 @@ def filter_available_rpms(rpms, import_conduit):
     available in the source repository
 
     :param rpms:            iterable of RPMs that are desired to be copied
-    :type  rpms:            iterable of pulp_rpm.common.models.RPM.NAMEDTUPLE
+    :type  rpms:            iterable of pulp_rpm.plugins.db.models.RPM.NAMEDTUPLE
     :param import_conduit:  import conduit passed to the Importer
     :type  import_conduit:  pulp.plugins.conduits.unit_import.ImportUnitConduit
     :return:    iterable of Units that should be copied
-    :return:    iterable of pulp.plugins.models.Unit
+    :return:    iterable of pulp.plugins.model.Unit
     """
     return existing.get_existing_units((_no_checksum_clean_unit_key(unit) for unit in rpms),
-                                        models.RPM.UNIT_KEY_NAMES, models.RPM.TYPE,
-                                        import_conduit.get_source_units)
+                                       models.RPM.UNIT_KEY_NAMES, models.RPM.TYPE,
+                                       import_conduit.get_source_units)
 
 
-def copy_rpms(units, import_conduit, copy_deps):
+def copy_rpms(units, import_conduit, copy_deps, solver=None):
     """
     Copy RPMs from the source repo to the destination repo, and optionally copy
     dependencies as well. Dependencies are resolved recursively.
@@ -178,6 +170,11 @@ def copy_rpms(units, import_conduit, copy_deps):
                             and Provides declarations that are found in the
                             source repository. Silently skips any dependencies
                             that cannot be resolved within the source repo.
+    :param solver:          an object that can be used for dependency solving.
+                            this is useful so that data can be cached in the
+                            depsolving object and re-used by each iteration of
+                            this method.
+    :type  solver:          pulp_rpm.plugins.importers.yum.depsolve.Solver
 
     :return:    set of pulp.plugins.models.Unit that were copied
     :rtype:     set
@@ -185,21 +182,31 @@ def copy_rpms(units, import_conduit, copy_deps):
     unit_set = set()
 
     for unit in units:
+        # we are passing in units that may have flattened "provides" metadata.
+        # This flattened field is not used by associate_unit().
         import_conduit.associate_unit(unit)
         unit_set.add(unit)
 
     if copy_deps and unit_set:
-        deps = depsolve.find_dependent_rpms(unit_set, import_conduit.get_source_units)
-        # only consider deps that exist in the source repo
-        available_deps = set(filter_available_rpms(deps, import_conduit))
+        if solver is None:
+            solver = depsolve.Solver(import_conduit.get_source_units)
+
+        # This returns units that have a flattened 'provides' metadata field
+        # for memory purposes (RHBZ #1185868)
+        deps = solver.find_dependent_rpms(unit_set)
+
         # remove rpms already in the destination repo
-        existing_units = set(existing.get_existing_units([dep.unit_key for dep in available_deps],
+        existing_units = set(existing.get_existing_units([dep.unit_key for dep in deps],
                                                          models.RPM.UNIT_KEY_NAMES, models.RPM.TYPE,
                                                          import_conduit.get_destination_units))
-        to_copy = available_deps - existing_units
+
+        # the hash comparison for Units is unit key + type_id, the metadata
+        # field is not used.
+        to_copy = deps - existing_units
+
         _LOGGER.debug('Copying deps: %s' % str(sorted([x.unit_key['name'] for x in to_copy])))
         if to_copy:
-            unit_set |= copy_rpms(to_copy, import_conduit, copy_deps)
+            unit_set |= copy_rpms(to_copy, import_conduit, copy_deps, solver)
 
     return unit_set
 
@@ -214,7 +221,7 @@ def _no_checksum_clean_unit_key(unit_tuple):
     particularly useful for repos where the errata to not specify epochs
 
     :param unit_tuple:  unit to convert
-    :type  unit_tuple:  pulp_rpm.common.models.RPM.NAMEDTUPLE
+    :type  unit_tuple:  pulp_rpm.plugins.db.models.RPM.NAMEDTUPLE
 
     :return:    unit key without checksum data
     :rtype:     dict
@@ -253,7 +260,8 @@ def copy_rpms_by_name(names, import_conduit, copy_deps):
         if previous is None:
             to_copy[model.key_string_without_version] = (model.complete_version_serialized, unit)
         else:
-            to_copy[model.key_string_without_version] = max(((model.complete_version_serialized, unit), previous))
+            to_copy[model.key_string_without_version] = max(
+                ((model.complete_version_serialized, unit), previous))
 
     return copy_rpms((unit for v, unit in to_copy.itervalues()), import_conduit, copy_deps)
 
@@ -323,7 +331,8 @@ def _associate_unit(dest_repo, import_conduit, unit):
         model = models.YumMetadataFile(unit.unit_key['data_type'], dest_repo.id, unit.metadata)
         model.clean_metadata()
         relative_path = os.path.join(model.relative_dir, os.path.basename(unit.storage_path))
-        new_unit = import_conduit.init_unit(model.TYPE, model.unit_key, model.metadata, relative_path)
+        new_unit = import_conduit.init_unit(model.TYPE, model.unit_key, model.metadata,
+                                            relative_path)
         shutil.copyfile(unit.storage_path, new_unit.storage_path)
         import_conduit.save_unit(new_unit)
         return new_unit

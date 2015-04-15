@@ -1,15 +1,4 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
 from cStringIO import StringIO
 import os
@@ -17,8 +6,9 @@ import functools
 import unittest
 from xml.etree import ElementTree
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum.repomd import group, packages
+
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '../../../../../data/')
 
@@ -73,7 +63,7 @@ class TestProcessCategoryElement(unittest.TestCase):
 
     def test_fedora18_real_data(self):
         categories = packages.package_list_generator(StringIO(F18_COMPS_XML), group.CATEGORY_TAG,
-                                                 self.process_category)
+                                                     self.process_category)
         categories = list(categories)
 
         self.assertEqual(len(categories), 1)
@@ -91,8 +81,9 @@ class TestProcessCategoryElement(unittest.TestCase):
         self.assertEqual(len(categories[0].metadata['translated_name']), 8)
 
     def test_centos6_real_data(self):
-        categories = packages.package_list_generator(StringIO(CENTOS6_COMPS_XML), group.CATEGORY_TAG,
-                                                 self.process_category)
+        categories = packages.package_list_generator(StringIO(CENTOS6_COMPS_XML),
+                                                     group.CATEGORY_TAG,
+                                                     self.process_category)
         categories = list(categories)
 
         self.assertEqual(len(categories), 1)
@@ -110,7 +101,6 @@ class TestProcessCategoryElement(unittest.TestCase):
 
 
 class TestProcessEnvironmentElement(unittest.TestCase):
-
     def setUp(self):
         self.process_environment = functools.partial(group.process_environment_element, 'repo1')
 
@@ -137,6 +127,28 @@ class TestProcessEnvironmentElement(unittest.TestCase):
         self.assertEquals(group_model.metadata['description'], 'foo-desc')
         self.assertEquals(len(group_model.group_ids), 1)
         self.assertEquals(group_model.group_ids[0], 'group1')
+
+    def test_optionlist_missing(self):
+        """
+        In debugging #1065016[0], we learned that optionlist might not always be present for each
+        environment. This test ensures that the package environment returned by this method has an
+        empty list when the optionlist isn't present.
+
+        [0] https://bugzilla.redhat.com/show_bug.cgi?id=1065016
+        """
+        env_element = ElementTree.Element('environment')
+        ElementTree.SubElement(env_element, 'id').text = 'test-id'
+        ElementTree.SubElement(env_element, 'display_order').text = '5'
+        ElementTree.SubElement(env_element, 'name').text = 'foo-name'
+        ElementTree.SubElement(env_element, 'description').text = 'foo-desc'
+        group_list = ElementTree.SubElement(env_element, 'grouplist')
+        ElementTree.SubElement(group_list, 'groupid').text = 'group1'
+
+        # This should not blow up
+        group_model = self.process_environment(env_element)
+
+        # The options should be an empty list
+        self.assertEqual(group_model.options, [])
 
     def test_translated_description(self):
         ElementTree.SubElement(self.element, 'description', {group.LANGUAGE_TAG: 'fr'}).text \
@@ -416,7 +428,8 @@ CENTOS6_COMPS_XML = u"""<?xml version='1.0' encoding='UTF-8'?>
    <packagelist>
       <packagereq requires="autocorr-en" type="conditional">autocorr-af</packagereq>
       <packagereq requires="hyphen" type="conditional">hyphen-af</packagereq>
-      <packagereq requires="libreoffice-core" type="conditional">libreoffice-langpack-af</packagereq>
+      <packagereq requires="libreoffice-core"
+      type="conditional">libreoffice-langpack-af</packagereq>
    </packagelist>
   </group>
   <group>
@@ -476,8 +489,8 @@ CENTOS6_COMPS_XML = u"""<?xml version='1.0' encoding='UTF-8'?>
    <uservisible>true</uservisible>
    <langonly>sq</langonly>
    <packagelist>
-   	          <packagereq requires="eclipse-platform" type="conditional">eclipse-nls-sq</packagereq>
-      <packagereq requires="hunspell" type="conditional">hunspell-sq</packagereq>
+       <packagereq requires="eclipse-platform" type="conditional">eclipse-nls-sq</packagereq>
+       <packagereq requires="hunspell" type="conditional">hunspell-sq</packagereq>
    </packagelist>
   </group>
   <category>

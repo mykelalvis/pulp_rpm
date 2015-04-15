@@ -1,24 +1,16 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
+from gettext import gettext as _
 import functools
+import logging
 
 from pulp.common.plugins import importer_constants
 from pulp.server.db.model.criteria import UnitAssociationCriteria
 from pulp.server.managers.repo.unit_association import OWNER_TYPE_IMPORTER
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum.repomd import packages, primary, presto, updateinfo, group
+
+
+_logger = logging.getLogger(__name__)
 
 
 def purge_unwanted_units(metadata_files, conduit, config):
@@ -39,6 +31,7 @@ def purge_unwanted_units(metadata_files, conduit, config):
     :type  config:          pulp.plugins.config.PluginCallConfiguration
     """
     if config.get_boolean(importer_constants.KEY_UNITS_REMOVE_MISSING) is True:
+        _logger.info(_('Removing missing units.'))
         remove_missing_rpms(metadata_files, conduit)
         remove_missing_drpms(metadata_files, conduit)
         remove_missing_errata(metadata_files, conduit)
@@ -48,6 +41,7 @@ def purge_unwanted_units(metadata_files, conduit, config):
 
     retain_old_count = config.get(importer_constants.KEY_UNITS_RETAIN_OLD_COUNT)
     if retain_old_count is not None:
+        _logger.info(_('Removing old units.'))
         num_to_keep = int(retain_old_count) + 1
         remove_old_versions(num_to_keep, conduit)
 
@@ -109,10 +103,14 @@ def remove_missing_drpms(metadata_files, conduit):
                             and remove_unit methods.
     :type  conduit:         pulp.plugins.conduits.repo_sync.RepoSyncConduit
     """
-    file_function = functools.partial(metadata_files.get_metadata_file_handle,
-                                      presto.METADATA_FILE_NAME)
-    remote_named_tuples = get_remote_units(file_function, presto.PACKAGE_TAG,
-                                           presto.process_package_element)
+    remote_named_tuples = set()
+    for metadata_file_name in presto.METADATA_FILE_NAMES:
+        file_function = functools.partial(metadata_files.get_metadata_file_handle,
+                                          metadata_file_name)
+        file_tuples = get_remote_units(file_function, presto.PACKAGE_TAG,
+                                       presto.process_package_element)
+        remote_named_tuples = remote_named_tuples.union(file_tuples)
+
     remove_missing_units(conduit, models.DRPM, remote_named_tuples)
 
 
@@ -194,8 +192,8 @@ def remove_missing_units(conduit, model, remote_named_tuples):
     :param conduit:         a conduit from the platform containing the get_units
                             and remove_unit methods.
     :type  conduit:         pulp.plugins.conduits.repo_sync.RepoSyncConduit
-    :param model:           subclass of pulp_rpm.common.models.Package
-    :type  model:           pulp_rpm.common.models.Package
+    :param model:           subclass of pulp_rpm.plugins.db.models.Package
+    :type  model:           pulp_rpm.plugins.db.models.Package
     :param remote_named_tuples: set of named tuples representing units in the
                                 remote repository
     :type  remote_named_tuples: set
@@ -213,8 +211,8 @@ def get_existing_units(model, unit_search_func):
     """
     Get an iterable of Units that are already in the local repository
 
-    :param model:               subclass of pulp_rpm.common.models.Package
-    :type  model:               pulp_rpm.common.models.Package
+    :param model:               subclass of pulp_rpm.plugins.db.models.Package
+    :type  model:               pulp_rpm.plugins.db.models.Package
     :param unit_search_func:    function that takes one parameter, a
                                 UnitAssociationCriteria, and searches for units
                                 in the relevant repository.

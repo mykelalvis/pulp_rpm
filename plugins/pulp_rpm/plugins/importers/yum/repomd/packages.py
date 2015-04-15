@@ -1,15 +1,4 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
 import logging
 import os
@@ -48,7 +37,8 @@ def package_list_generator(xml_handle, package_tag, process_func=None):
     :rtype: generator
     """
     if process_func is None:
-        process_func = lambda x: x
+        def process_func(x):
+            return x
     parser = iterparse(xml_handle, events=('start', 'end'))
     xml_iterator = iter(parser)
 
@@ -59,7 +49,7 @@ def package_list_generator(xml_handle, package_tag, process_func=None):
     # I know. This is a terrible misuse of SyntaxError. Don't blame the messenger.
     except SyntaxError:
         _LOGGER.error('failed to parse XML metadata file')
-        return
+        raise
 
     for event, element in xml_iterator:
         # if we're not at a fully parsed package element, keep going
@@ -69,7 +59,7 @@ def package_list_generator(xml_handle, package_tag, process_func=None):
         if not (element.tag == package_tag or re.sub(NS_STRIP_RE, '', element.tag) == package_tag):
             continue
 
-        root_element.clear() # clear all previously parsed ancestors of the root
+        root_element.clear()  # clear all previously parsed ancestors of the root
 
         package_info = process_func(element)
         yield package_info

@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
-from pulp_rpm.common import constants, models
+from gettext import gettext as _
+import logging
+
+from pulp_rpm.common import constants
+from pulp_rpm.plugins.db import models
+
+
+_logger = logging.getLogger(__name__)
 
 type_done_map = {
     models.RPM.TYPE: 'rpm_done',
@@ -20,8 +16,8 @@ type_done_map = {
 }
 
 type_total_map = {
-    'rpm_total' : models.RPM.TYPE,
-    'drpm_total' : models.DRPM.TYPE,
+    'rpm_total': models.RPM.TYPE,
+    'drpm_total': models.DRPM.TYPE,
 }
 
 
@@ -46,9 +42,9 @@ class ContentReport(dict):
         self['size_left'] = 0
         self['state'] = constants.STATE_NOT_STARTED
         self['details'] = {
-            'rpm_done' : 0,
+            'rpm_done': 0,
             'rpm_total': 0,
-            'drpm_done' : 0,
+            'drpm_done': 0,
             'drpm_total': 0,
         }
 
@@ -62,6 +58,8 @@ class ContentReport(dict):
 
     def success(self, model):
         self['items_left'] -= 1
+        if self['items_left'] % 100 == 0:
+            _logger.debug(_('%(n)s items left to download.') % {'n': self['items_left']})
         self['size_left'] -= model.metadata['size']
         done_attribute = type_done_map[model.TYPE]
         self['details'][done_attribute] += 1

@@ -45,7 +45,9 @@ All Bugs
 --------
 
 You can see the complete list of over 100 bugs that were
-`fixed in Pulp 2.3.0 <https://bugzilla.redhat.com/buglist.cgi?bug_status=VERIFIED&classification=Community&list_id=1927252&product=Pulp&query_format=advanced&target_release=2.3.0>`_.
+`fixed in Pulp 2.3.0 <https://bugzilla.redhat.com/buglist.cgi?bug_status=VERIFIED
+&bug_status=RELEASE_PENDING&bug_status=CLOSED&classification=Community&component=
+iso-support&component=rpm-support&list_id=3357893&product=Pulp&version=2.3.0>`_.
 
 
 Known Issues
@@ -65,7 +67,8 @@ Bugs Fixed
 - `SRPM copy <https://bugzilla.redhat.com/show_bug.cgi?id=1045100>`_ is now supported
   by ``pulp-admin``.
 
-- REST API clients could `see incorrect behavior <https://bugzilla.redhat.com/show_bug.cgi?id=1038309>`_
+- REST API clients could
+  `see incorrect behavior <https://bugzilla.redhat.com/show_bug.cgi?id=1038309>`_
   if using a ``distributor_id`` value different from the ``distributor_type_id``
   when adding a distributor to a repository. This issue did not affect users who
   only use ``pulp-admin`` to interact with the REST API.

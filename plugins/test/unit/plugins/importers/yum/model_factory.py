@@ -1,22 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import functools
 from itertools import count
 
 from pulp.plugins.model import Unit
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
+
 
 _rpm_counter = count()
 _srpm_counter = count()
@@ -33,6 +21,7 @@ def as_units(f):
     def wrapper(*args, **kwargs):
         models = f(*args, **kwargs)
         return [Unit(model.TYPE, model.unit_key, model.metadata, '') for model in models]
+
     return wrapper
 
 
@@ -123,7 +112,7 @@ def group_models(num, same_repo=True):
         ret.append(models.PackageGroup(
             'name-%d' % count,
             repo_id,
-            {'default_package_names':['abc%d' % count, 'xyz%d' % count]}
+            {'default_package_names': ['abc%d' % count, 'xyz%d' % count]}
         ))
         count = _group_counter.next()
     return ret
@@ -144,7 +133,7 @@ def category_models(num, same_repo=True):
         ret.append(models.PackageCategory(
             'name-%d' % count,
             repo_id,
-            {'packagegroupids':['abc%d' % count, 'xyz%d' % count]}
+            {'packagegroupids': ['abc%d' % count, 'xyz%d' % count]}
         ))
         count = _category_counter.next()
     return ret
@@ -168,7 +157,7 @@ def environment_models(num, same_repo=True):
             {'group_ids': ['abc%d' % count, 'xyz%d' % count],
              'options': [{'default': False, 'group': 'op%d' % count},
                          {'default': True, 'group': 'bz%d' % count}]
-            }
+             }
         ))
         count = _environment_counter.next()
     return ret
@@ -194,7 +183,7 @@ def errata_models(num):
             del r['checksumtype']
         ret.append(models.Errata(
             'name-%d' % count,
-            {'pkglist': [{'packages': rpms}]}
+            {'pkglist': [{'packages': rpms, 'name': 'somerepo-%d' % count}]}
         ))
         count = _errata_counter.next()
     return ret

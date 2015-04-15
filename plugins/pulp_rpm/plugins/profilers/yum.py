@@ -1,26 +1,15 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from gettext import gettext as _
 
-from pulp.plugins.conduits.mixins import UnitAssociationCriteria
 from pulp.plugins.profiler import Profiler, InvalidUnitsRequested
+from pulp.server.db.model.criteria import UnitAssociationCriteria
 
 from pulp_rpm.common.ids import TYPE_ID_ERRATA, TYPE_ID_RPM
 from pulp_rpm.yum_plugin import util
 
 
 _logger = util.getLogger(__name__)
+
+NVREA_KEYS = ['name', 'version', 'release', 'epoch', 'arch']
 
 
 def entry_point():
@@ -71,7 +60,8 @@ class YumProfiler(Profiler):
         return {
             TYPE_ID_RPM: YumProfiler._calculate_applicable_units(TYPE_ID_RPM, profile_lookup_table,
                                                                  bound_repo_id, config, conduit),
-            TYPE_ID_ERRATA: YumProfiler._calculate_applicable_units(TYPE_ID_ERRATA, profile_lookup_table,
+            TYPE_ID_ERRATA: YumProfiler._calculate_applicable_units(TYPE_ID_ERRATA,
+                                                                    profile_lookup_table,
                                                                     bound_repo_id, config, conduit)}
 
     @staticmethod
@@ -97,8 +87,8 @@ class YumProfiler(Profiler):
                          each dictionary contains 'type_id' and 'unit_key' keys. All type_ids will
                          be of the RPM type.
         :rtype:          list
-        :raises InvalidUnitsRequested: if an erratum was specified and no repository was found that contains
-                                       the specified errata
+        :raises InvalidUnitsRequested: if an erratum was specified and no repository was found
+                                       that contains the specified errata
         """
         translated_units = []
         for unit in units:
@@ -139,7 +129,7 @@ class YumProfiler(Profiler):
         """
         if content_type == TYPE_ID_RPM:
             profile = [
-                ((p['name'], p['epoch'], p['version'], p['release'], p['arch'], p['vendor']), p) \
+                ((p['name'], p['epoch'], p['version'], p['release'], p['arch'], p['vendor']), p)
                 for p in profile]
             profile.sort()
             return [p[1] for p in profile]
@@ -147,7 +137,8 @@ class YumProfiler(Profiler):
             return profile
 
     @staticmethod
-    def _calculate_applicable_units(content_type, profile_lookup_table, bound_repo_id, config, conduit):
+    def _calculate_applicable_units(content_type, profile_lookup_table, bound_repo_id, config,
+                                    conduit):
         """
         Calculate and return a list of unit ids of given content_type applicable to a unit profile
         represented by given profile_lookup_table. Applicability is calculated against all units
@@ -155,7 +146,7 @@ class YumProfiler(Profiler):
 
         :param content_type:  The content type id that the profile represents
         :type  content_type:  basestring
-        :param profile_lookup_table: lookup table of a unit profile keyed by "name arch" 
+        :param profile_lookup_table: lookup table of a unit profile keyed by "name arch"
         :type profile_lookup_table: dict
         :param bound_repo_id: repo id of a repository to be used to calculate applicability
                               against the given consumer profile
@@ -171,13 +162,19 @@ class YumProfiler(Profiler):
         additional_unit_fields = ['pkglist'] if content_type == TYPE_ID_ERRATA else []
         units = conduit.get_repo_units(bound_repo_id, content_type, additional_unit_fields)
 
+        # this needs to be fetched outside of the units loop :)
+        if content_type == TYPE_ID_ERRATA:
+            available_rpm_nevras = [YumProfiler._create_nevra(r.unit_key) for r in
+                                    conduit.get_repo_units(bound_repo_id, TYPE_ID_RPM)]
+
         applicable_unit_ids = []
         # Check applicability for each unit
         for unit in units:
             if content_type == TYPE_ID_RPM:
                 applicable = YumProfiler._is_rpm_applicable(unit.unit_key, profile_lookup_table)
             elif content_type == TYPE_ID_ERRATA:
-                applicable = YumProfiler._is_errata_applicable(unit, profile_lookup_table)
+                applicable = YumProfiler._is_errata_applicable(
+                    unit, profile_lookup_table, available_rpm_nevras)
             else:
                 applicable = False
 
@@ -219,7 +216,8 @@ class YumProfiler(Profiler):
     def _form_lookup_table(rpms):
         """
         Build a dictionary mapping RPM names and arches (generated with the _form_lookup_key()
-        method) to the full unit key for each RPM.
+        method) to the full unit key for each RPM. In case of multiple rpms with same name and
+        arch, unit key of the newest rpm is stored as the value.
 
         :param rpms: A list of RPM unit keys
         :type  rpms: list
@@ -228,9 +226,13 @@ class YumProfiler(Profiler):
         """
         lookup = {}
         for rpm in rpms:
-            # Since only one name.arch is allowed to be installed on a machine,
-            # we will use "name arch" as a key in the lookup table
             key = YumProfiler._form_lookup_key(rpm)
+            # In case of duplicate key, replace the value only if the rpm is newer
+            # than the old value.
+            if key in lookup:
+                existing_unit = lookup[key]
+                if not util.is_rpm_newer(rpm, existing_unit):
+                    continue
             lookup[key] = rpm
         return lookup
 
@@ -239,29 +241,34 @@ class YumProfiler(Profiler):
         """
         Return a list of RPMs that are referenced by an errata's pkglist
 
+        This method will translate 'null' to '0' in the epoch field. All
+        package lists should contain epoch fields but some do not.
+
         :param errata: The errata we wish to query for RPMs it contains
         :type errata:  pulp.plugins.model.Unit
         :return:       list of rpms, which are each a dict of nevra info
         :rtype:        list
         """
         rpms = []
-        if not errata.metadata.has_key("pkglist"):
+        if "pkglist" not in errata.metadata:
             _logger.warning("metadata for errata <%s> lacks a 'pkglist'" % (errata.unit_key['id']))
             return rpms
         for pkgs in errata.metadata['pkglist']:
             for rpm in pkgs["packages"]:
+                if 'epoch' not in rpm or rpm['epoch'] is None:
+                    rpm['epoch'] = '0'
                 rpms.append(rpm)
         return rpms
 
     @staticmethod
-    def _is_errata_applicable(errata, profile_lookup_table):
+    def _is_errata_applicable(errata, profile_lookup_table, available_rpm_nevras):
         """
         Checks whether given errata is applicable to the consumer.
 
         :param errata: Errata unit for which the applicability is being checked
         :type errata: pulp.plugins.model.Unit
 
-        :param profile_lookup_table: lookup table of a unit profile keyed by "name arch" 
+        :param profile_lookup_table: lookup table of a unit profile keyed by "name arch"
         :type profile_lookup_table: dict
 
         :return: true if applicable, false otherwise
@@ -270,12 +277,20 @@ class YumProfiler(Profiler):
         # Get rpms from errata
         errata_rpms = YumProfiler._get_rpms_from_errata(errata)
 
-        # Check if any rpm from errata is applicable to the consumer
+        # RHBZ #1171280: ensure we are only checking applicability against RPMs
+        # we have access to in the repo. This is to prevent a RHEL6 machine
+        # from finding RHEL7 packages, for example.
+        available_errata_rpms = []
         for errata_rpm in errata_rpms:
+            if YumProfiler._create_nevra(errata_rpm) in available_rpm_nevras:
+                available_errata_rpms.append(errata_rpm)
+
+        # Check if any rpm from errata is applicable to the consumer
+        for errata_rpm in available_errata_rpms:
             if YumProfiler._is_rpm_applicable(errata_rpm, profile_lookup_table):
                 return True
 
-        # Return false if none of the errata rpms are applicable    
+        # Return false if none of the errata rpms are applicable
         return False
 
     @staticmethod
@@ -285,7 +300,7 @@ class YumProfiler(Profiler):
 
         :param rpm_unit_key:         An rpm's unit_key
         :type  rpm_unit_key:         dict
-        :param profile_lookup_table: lookup table of consumer profile keyed by "name arch" 
+        :param profile_lookup_table: lookup table of consumer profile keyed by "name arch"
         :type  profile_lookup_table: dict
         :return:                     true if applicable, false otherwise
         :rtype:                      boolean
@@ -295,7 +310,7 @@ class YumProfiler(Profiler):
 
         key = YumProfiler._form_lookup_key(rpm_unit_key)
 
-        if profile_lookup_table.has_key(key):
+        if key in profile_lookup_table:
             installed_rpm = profile_lookup_table[key]
             # If an rpm is found, check if it is older than the available rpm
             if util.is_rpm_newer(rpm_unit_key, installed_rpm):
@@ -323,20 +338,23 @@ class YumProfiler(Profiler):
         """
         applicable_rpms = []
         older_rpms = {}
-        if not consumer.profiles.has_key(TYPE_ID_RPM):
-            _logger.warn("Consumer [%s] is missing profile information for [%s], found profiles are: %s" % \
-                    (consumer.id, TYPE_ID_RPM, consumer.profiles.keys()))
+        if TYPE_ID_RPM not in consumer.profiles:
+            _logger.warn(
+                "Consumer [%s] is missing profile information for [%s], found profiles are: %s" %
+                (consumer.id, TYPE_ID_RPM, consumer.profiles.keys()))
             return applicable_rpms, older_rpms
         lookup = YumProfiler._form_lookup_table(consumer.profiles[TYPE_ID_RPM])
         for errata_rpm in errata_rpms:
             key = YumProfiler._form_lookup_key(errata_rpm)
-            if lookup.has_key(key):
+            if key in lookup:
                 installed_rpm = lookup[key]
                 is_newer = util.is_rpm_newer(errata_rpm, installed_rpm)
-                _logger.debug("Found a match of rpm <%s> installed on consumer, is %s newer than %s, %s" % (key, errata_rpm, installed_rpm, is_newer))
+                _logger.debug(
+                    "Found a match of rpm <%s> installed on consumer, is %s newer than %s, %s" %
+                    (key, errata_rpm, installed_rpm, is_newer))
                 if is_newer:
                     applicable_rpms.append(errata_rpm)
-                    older_rpms[key] = {"installed":installed_rpm, "available":errata_rpm}
+                    older_rpms[key] = {"installed": installed_rpm, "available": errata_rpm}
             else:
                 _logger.debug("rpm %s was not found in consumer profile of %s" % (key, consumer.id))
         return applicable_rpms, older_rpms
@@ -344,58 +362,87 @@ class YumProfiler(Profiler):
     @staticmethod
     def _translate_erratum(unit, repo_ids, consumer, conduit):
         """
-        Translates an erratum to a list of rpm units from given repo_ids.
-        The rpm units refer to the upgraded packages referenced by the erratum
-        only those rpms which will upgrade an existing rpm on the consumer are returned
+        Translates an erratum to a list of rpm unit keys from given repo_ids. The rpm unit keys
+        reference the subset of packages referenced by the erratum that are also applicable to the
+        consumer. Only those rpms which will upgrade an existing rpm on the consumer are returned
 
-        :param unit: A content unit key
-        :type unit: dict
+        Note that this method also checks to ensure that the RPMs are actually available to the
+        consumer.
 
-        :param repo_ids: Repo ids to restrict the unit search to.
-        :type repo_ids: list of str
-
-        :param consumer: A consumer.
-        :type consumer: pulp.server.plugins.model.Consumer
-
-        :param conduit: provides access to relevant Pulp functionality
-        :type conduit: pulp.plugins.conduits.profile.ProfilerConduit
-
-        :return:    a tuple consisting of
-                        list of dictionaries containing info on the 'translated units'.
-                        each dictionary contains a 'name' key which refers 
-                        to the rpm name associated to the errata
-
-                        dictionary containing information on what existing rpms will be upgraded
-
-        :rtype ([{'unit_key':{'name':name.arch}, 'type_id':'rpm'}], {'name arch':{'available':{},
-            'installed':{}}   })
-
-        :raises InvalidUnitsRequested if no repository was found that contains the specified errata
+        :param unit:                   A content unit key
+        :type  unit:                   dict
+        :param repo_ids:               Repo ids to restrict the unit search to.
+        :type  repo_ids:               list of str
+        :param consumer:               A consumer.
+        :type  consumer:               pulp.server.plugins.model.Consumer
+        :param conduit:                provides access to relevant Pulp functionality
+        :type  conduit:                pulp.plugins.conduits.profile.ProfilerConduit
+        :return:                       A 2-tuple, the first element of which is a list of
+                                       unit keys (dictionaries) containing info on the
+                                       'translated units'. Each dictionary contains a 'unit_key' key
+                                       which refers to the rpm's unit_key, and a 'type_id' key,
+                                       which will always be TYPE_ID_RPM. The second element is a
+                                       dictionary describing the details of the upgrade. It is the
+                                       second element returned by _rpms_applicable_to_consumer(), so
+                                       please see its docblock for details.
+        :rtype:                        tuple
+        :raises InvalidUnitsRequested: if no repository was found that contains the specified errata
         """
         unit_key = unit['unit_key']
-        errata = YumProfiler._find_unit_associated_to_repos(TYPE_ID_ERRATA, unit_key, repo_ids, conduit)
+        errata = YumProfiler._find_unit_associated_to_repos(TYPE_ID_ERRATA, unit_key, repo_ids,
+                                                            conduit)
         if not errata:
             error_msg = _("Unable to find errata with unit_key [%(key)s] in bound "
                           "repos [%(repos)s] to consumer [%(consumer)s]") % \
-                        {'key': unit_key, 'repos': repo_ids, 'consumer': consumer.id}
+                {'key': unit_key, 'repos': repo_ids, 'consumer': consumer.id}
             raise InvalidUnitsRequested(message=error_msg, units=unit_key)
 
-        updated_rpms = YumProfiler._get_rpms_from_errata(errata)
-        _logger.info("Errata <%s> refers to %s updated rpms of: %s" % (errata.unit_key['id'],
-                                                                       len(updated_rpms), updated_rpms))
-        applicable_rpms, upgrade_details = YumProfiler._rpms_applicable_to_consumer(consumer, updated_rpms)
+        # Get rpm dicts from errata
+        errata_rpms = YumProfiler._get_rpms_from_errata(errata)
+        _logger.info(
+            "Errata <%s> refers to %s updated rpms of: %s" % (errata.unit_key['id'],
+                                                              len(errata_rpms), errata_rpms))
+
+        # filter out RPMs we don't have access to (https://pulp.plan.io/issues/770).
+        updated_rpms = []
+
+        for errata_rpm in errata_rpms:
+            # the dicts from _get_rpms_from_errata contain some extra fields
+            # that are not in the RPM unit key.
+            nvrea = dict((k, v) for k, v in errata_rpm.iteritems() if k in NVREA_KEYS)
+            if YumProfiler._find_unit_associated_to_repos(TYPE_ID_RPM, nvrea,
+                                                          repo_ids, conduit):
+                updated_rpms.append(errata_rpm)
+
+        applicable_rpms, upgrade_details = YumProfiler._rpms_applicable_to_consumer(consumer,
+                                                                                    updated_rpms)
         if applicable_rpms:
-            _logger.info("Rpms: <%s> were found to be related to errata <%s> and applicable to consumer <%s>"
-                         % (applicable_rpms, errata, consumer.id))
+            _logger.info(
+                "Rpms: <%s> were found to be related to errata <%s> and applicable to consumer <%s>"
+                % (applicable_rpms, errata, consumer.id))
         # Return as list of name.arch values
         ret_val = []
-        for ar in applicable_rpms:
-            pkg_name = "%s-%s:%s-%s.%s" % (ar["name"], ar["epoch"], ar["version"], ar["release"], ar["arch"])
-            data = {"unit_key": {"name": pkg_name}, "type_id": TYPE_ID_RPM}
-            ret_val.append(data)
+        for applicable_rpm in applicable_rpms:
+            applicable_rpm = {"unit_key": applicable_rpm, "type_id": TYPE_ID_RPM}
+            ret_val.append(applicable_rpm)
         _logger.info("Translated errata <%s> to <%s>" % (errata, ret_val))
         # Add applicable errata details to the applicability report
         errata_details = errata.metadata
         errata_details['id'] = errata.unit_key['id']
         upgrade_details['errata_details'] = errata_details
         return ret_val, upgrade_details
+
+    @staticmethod
+    def _create_nevra(r):
+        """
+        A small helper method for comparing errata packages to rpm units
+
+        The "str()" conversion may be overly defensive but I am not sure. There
+        were mocks that needed this but I did not find an example during
+        testing with real data.
+
+        """
+        nevra = {'name': str(r['name']), 'epoch': str(r['epoch']),
+                 'version': str(r['version']), 'release': str(r['release']),
+                 'arch': str(r['arch'])}
+        return nevra

@@ -1,35 +1,32 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
-from cStringIO import StringIO
 from copy import deepcopy
+from cStringIO import StringIO
 import os
-import unittest
 
-import mock
+try:
+    import unittest2 as unittest
+except ImportError:
+    import unittest
+
 from nectar.config import DownloaderConfig
 from nectar.downloaders.base import Downloader
 from pulp.common.plugins import importer_constants
 from pulp.plugins.conduits.repo_sync import RepoSyncConduit
 from pulp.plugins.config import PluginCallConfiguration
-from pulp.plugins.model import Repository, SyncReport
+from pulp.plugins.model import Repository, SyncReport, Unit
+from pulp.server.exceptions import PulpCodedException
 import pulp.server.managers.factory as manager_factory
+import mock
 
-from pulp_rpm.common import models, constants
-from pulp_rpm.plugins.importers.yum.repomd import metadata, group, updateinfo, packages, presto, primary
-from pulp_rpm.plugins.importers.yum.report import ContentReport
-from pulp_rpm.plugins.importers.yum.sync import RepoSync, FailedException, CancelException
+from pulp_rpm.common import constants, ids
+from pulp_rpm.plugins import error_codes
+from pulp_rpm.plugins.db import models
+from pulp_rpm.plugins.importers.yum.existing import check_all_and_associate
+from pulp_rpm.plugins.importers.yum.parse import treeinfo
+from pulp_rpm.plugins.importers.yum.repomd import metadata, group, updateinfo, packages, presto, \
+    primary
+from pulp_rpm.plugins.importers.yum.sync import RepoSync, CancelException
 import model_factory
+
 
 manager_factory.initialize()
 
@@ -38,6 +35,7 @@ class BaseSyncTest(unittest.TestCase):
     def setUp(self):
         self.url = 'http://pulpproject.org/'
         self.metadata_files = metadata.MetadataFiles(self.url, '/foo/bar', DownloaderConfig())
+        self.metadata_files.download_repomd = mock.MagicMock()
         self.repo = Repository('repo1')
         self.conduit = RepoSyncConduit(self.repo.id, 'yum_importer', 'user', 'me')
         self.conduit.set_progress = mock.MagicMock(spec_set=self.conduit.set_progress)
@@ -101,7 +99,8 @@ class TestRun(BaseSyncTest):
                                                     return_value=self.metadata_files)
         self.reposync.update_content = mock.MagicMock(spec_set=self.reposync.update_content)
         self.reposync.get_errata = mock.MagicMock(spec_set=self.reposync.get_errata)
-        self.reposync.get_comps_file_units = mock.MagicMock(spec_set=self.reposync.get_comps_file_units)
+        self.reposync.get_comps_file_units = mock.MagicMock(
+            spec_set=self.reposync.get_comps_file_units)
 
         self.reposync.set_progress = mock.MagicMock(spec_set=self.reposync.set_progress)
 
@@ -132,7 +131,8 @@ class TestRun(BaseSyncTest):
                  mock.call(self.metadata_files, group.process_category_element, group.CATEGORY_TAG)]
         self.reposync.get_comps_file_units.assert_has_calls(calls, any_order=True)
 
-        mock_treeinfo_sync.assert_called_once_with(self.conduit, self.url, mock_mkdtemp.return_value,
+        mock_treeinfo_sync.assert_called_once_with(self.conduit, self.url,
+                                                   mock_mkdtemp.return_value,
                                                    self.reposync.nectar_config,
                                                    self.reposync.distribution_report,
                                                    self.reposync.set_progress)
@@ -170,11 +170,11 @@ class TestRun(BaseSyncTest):
         self.assertEqual(report.details['distribution']['state'],
                          constants.STATE_SKIPPED)
 
+    @mock.patch('pulp_rpm.plugins.importers.yum.sync.treeinfo')
     @mock.patch('shutil.rmtree', autospec=True)
     @mock.patch('tempfile.mkdtemp', autospec=True)
     @mock.patch('nectar.config.DownloaderConfig.finalize')
-    def test_finalize(self, mock_finalize, mock_mkdtemp, mock_rmtree):
-
+    def test_finalize(self, mock_finalize, mock_mkdtemp, mock_rmtree, mock_treeinfo):
         self.reposync.run()
 
         mock_finalize.assert_called_once()
@@ -206,9 +206,10 @@ class TestRun(BaseSyncTest):
         self.config = PluginCallConfiguration({}, {})
         reposync = RepoSync(self.repo, self.conduit, self.config)
         reposync.call_config.get(importer_constants.KEY_FEED)
-        report = reposync.run()
-        self.assertEquals(report.details['metadata']['error'],
-                          'Unable to sync a repository that has no feed')
+
+        with self.assertRaises(PulpCodedException) as e:
+            reposync.run()
+        self.assertEquals(e.exception.error_code, error_codes.RPM1005)
 
 
 class TestProgressSummary(BaseSyncTest):
@@ -235,14 +236,20 @@ class TestGetMetadata(BaseSyncTest):
         mock_metadata_files.return_value = self.metadata_files
         self.metadata_files.download_repomd = mock.MagicMock(side_effect=IOError, autospec=True)
 
-        self.assertRaises(FailedException, self.reposync.get_metadata)
+        with self.assertRaises(PulpCodedException) as e:
+            self.reposync.get_metadata()
+
+        self.assertEqual(e.exception.error_code, error_codes.RPM1004)
 
     @mock.patch.object(metadata, 'MetadataFiles', autospec=True)
     def test_failed_download_repomd(self, mock_metadata_files):
         mock_metadata_files.return_value = self.metadata_files
-        self.metadata_files.parse_repomd = mock.MagicMock(side_effect=ValueError, autospec=True)
+        self.metadata_files.download_repomd = mock.MagicMock(side_effect=IOError, autospec=True)
 
-        self.assertRaises(FailedException, self.reposync.get_metadata)
+        with self.assertRaises(PulpCodedException) as e:
+            self.reposync.get_metadata()
+
+        self.assertEqual(e.exception.error_code, error_codes.RPM1004)
 
     @mock.patch.object(metadata, 'MetadataFiles', autospec=True)
     def test_failed_parse_repomd(self, mock_metadata_files):
@@ -250,13 +257,17 @@ class TestGetMetadata(BaseSyncTest):
         self.metadata_files.download_repomd = mock.MagicMock(autospec=True)
         self.metadata_files.parse_repomd = mock.MagicMock(side_effect=ValueError, autospec=True)
 
-        self.assertRaises(FailedException, self.reposync.get_metadata)
+        with self.assertRaises(PulpCodedException) as e:
+            self.reposync.get_metadata()
+
+        self.assertEqual(e.exception.error_code, error_codes.RPM1006)
 
     @mock.patch.object(metadata, 'MetadataFiles', autospec=True)
     def test_success(self, mock_metadata_files):
         mock_metadata_instane = mock_metadata_files.return_value
         mock_metadata_instane.downloader = mock.MagicMock()
-        self.reposync.import_unknown_metadata_files = mock.MagicMock(spec_set=self.reposync.import_unknown_metadata_files)
+        self.reposync.import_unknown_metadata_files = mock.MagicMock(
+            spec_set=self.reposync.import_unknown_metadata_files)
 
         ret = self.reposync.get_metadata()
 
@@ -269,6 +280,10 @@ class TestGetMetadata(BaseSyncTest):
 
 
 class TestSaveMetadataChecksum(BaseSyncTest):
+    """
+    This class contains tests for the save_default_metadata_checksum_on_repo() method.
+    """
+
     def setUp(self):
         super(TestSaveMetadataChecksum, self).setUp()
         self.reposync.tmp_dir = '/tmp'
@@ -290,8 +305,27 @@ class TestSaveMetadataChecksum(BaseSyncTest):
         self.reposync.save_default_metadata_checksum_on_repo(self.metadata_files)
         self.assertFalse(self.conduit.set_repo_scratchpad.called)
 
+    def test_sanitizes_checksum_type(self):
+        """
+        Ensure that the method properly sanitizes the checksum type.
+        """
+        self.conduit.get_repo_scratchpad = mock.Mock(return_value={})
+        self.conduit.set_repo_scratchpad = mock.Mock()
+
+        file_info = deepcopy(metadata.FILE_INFO_SKEL)
+        file_info['checksum']['algorithm'] = 'sha'
+        self.metadata_files.metadata['foo'] = file_info
+
+        self.reposync.save_default_metadata_checksum_on_repo(self.metadata_files)
+        self.conduit.set_repo_scratchpad.assert_called_once_with(
+            {constants.SCRATCHPAD_DEFAULT_METADATA_CHECKSUM: 'sha1'})
+
 
 class ImportUnknownMetadataFiles(BaseSyncTest):
+    """
+    This class contains tests for the RepoSync.import_unknown_metadata_files function.
+    """
+
     def setUp(self):
         super(ImportUnknownMetadataFiles, self).setUp()
         self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
@@ -331,12 +365,35 @@ class ImportUnknownMetadataFiles(BaseSyncTest):
         mock_copy.assert_called_once_with('path/to/fake_type.xml',
                                           self.conduit.init_unit.return_value.storage_path)
 
+    @mock.patch('shutil.copyfile', autospec=True)
+    def test_sanitizes_checksum_type(self, mock_copy):
+        """
+        Assert that the method sanitizes the checksum type.
+        """
+        self.metadata_files.metadata['fake_type'] = {
+            'checksum': {'hex_digest': 'checksum_value', 'algorithm': 'sha'},
+            'local_path': 'path/to/fake_type.xml'
+        }
+
+        self.reposync.import_unknown_metadata_files(self.metadata_files)
+
+        self.conduit.init_unit.assert_called_once_with(
+            models.YumMetadataFile.TYPE,
+            {'repo_id': self.repo.id, 'data_type': 'fake_type'},
+            {'checksum': 'checksum_value', 'checksum_type': 'sha1'},
+            '%s/fake_type.xml' % self.repo.id,
+        )
+        self.conduit.save_unit.assert_called_once_with(self.conduit.init_unit.return_value)
+        mock_copy.assert_called_once_with('path/to/fake_type.xml',
+                                          self.conduit.init_unit.return_value.storage_path)
+
 
 class TestUpdateContent(BaseSyncTest):
     """
     The function being tested doesn't really do anything besides walk through a
     workflow of calling other functions.
     """
+
     @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._decide_what_to_download',
                 spec_set=RepoSync._decide_what_to_download)
     @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync.download',
@@ -394,7 +451,8 @@ class TestDecideRPMsToDownload(BaseSyncTest):
         self.assertEqual(ret, (set(), 0, 0))
 
     @mock.patch('__builtin__.open', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._identify_wanted_versions',
                 spec_set=RepoSync._identify_wanted_versions)
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
@@ -403,7 +461,8 @@ class TestDecideRPMsToDownload(BaseSyncTest):
         primary_file = StringIO()
         mock_open.return_value = primary_file
         model = model_factory.rpm_models(1)[0]
-        self.metadata_files.metadata[primary.METADATA_FILE_NAME] = {'local_path': '/path/to/primary'}
+        self.metadata_files.metadata[primary.METADATA_FILE_NAME] = \
+            {'local_path': '/path/to/primary'}
         mock_generator.return_value = [model.as_named_tuple]
         mock_identify.return_value = {model.as_named_tuple: 1024}
         mock_check_repo.return_value = set([model.as_named_tuple])
@@ -412,16 +471,19 @@ class TestDecideRPMsToDownload(BaseSyncTest):
 
         self.assertEqual(ret, (set([model.as_named_tuple]), 1, 1024))
         mock_open.assert_called_once_with('/path/to/primary', 'r')
-        mock_generator.assert_called_once_with(primary_file, primary.PACKAGE_TAG, primary.process_package_element)
+        mock_generator.assert_called_once_with(primary_file, primary.PACKAGE_TAG,
+                                               primary.process_package_element)
         mock_identify.assert_called_once_with(mock_generator.return_value)
         self.assertTrue(primary_file.closed)
 
     @mock.patch('__builtin__.open', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     def test_closes_file_on_exception(self, mock_generator, mock_open):
         primary_file = StringIO()
         mock_open.return_value = primary_file
-        self.metadata_files.metadata[primary.METADATA_FILE_NAME] = {'local_path': '/path/to/primary'}
+        self.metadata_files.metadata[primary.METADATA_FILE_NAME] = \
+            {'local_path': '/path/to/primary'}
         mock_generator.side_effect = ValueError
 
         self.assertRaises(ValueError, self.reposync._decide_rpms_to_download,
@@ -440,14 +502,16 @@ class TestDecideDRPMsToDownload(BaseSyncTest):
         self.assertEqual(ret, (set(), 0, 0))
 
     def test_no_file_available(self):
-        self.assertTrue(self.metadata_files.get_metadata_file_handle(presto.METADATA_FILE_NAME) is None)
+        self.assertTrue(
+            self.metadata_files.get_metadata_file_handle(presto.METADATA_FILE_NAMES[0]) is None)
 
         ret = self.reposync._decide_drpms_to_download(self.metadata_files)
 
         self.assertEqual(ret, (set(), 0, 0))
 
     @mock.patch('__builtin__.open', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._identify_wanted_versions',
                 spec_set=RepoSync._identify_wanted_versions)
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
@@ -456,7 +520,8 @@ class TestDecideDRPMsToDownload(BaseSyncTest):
         presto_file = StringIO()
         mock_open.return_value = presto_file
         model = model_factory.drpm_models(1)[0]
-        self.metadata_files.metadata[presto.METADATA_FILE_NAME] = {'local_path': '/path/to/presto'}
+        self.metadata_files.metadata[presto.METADATA_FILE_NAMES[0]] = \
+            {'local_path': '/path/to/presto'}
         mock_generator.return_value = [model.as_named_tuple]
         mock_identify.return_value = {model.as_named_tuple: 1024}
         mock_check_repo.return_value = set([model.as_named_tuple])
@@ -465,16 +530,19 @@ class TestDecideDRPMsToDownload(BaseSyncTest):
 
         self.assertEqual(ret, (set([model.as_named_tuple]), 1, 1024))
         mock_open.assert_called_once_with('/path/to/presto', 'r')
-        mock_generator.assert_called_once_with(presto_file, presto.PACKAGE_TAG, presto.process_package_element)
+        mock_generator.assert_called_once_with(presto_file, presto.PACKAGE_TAG,
+                                               presto.process_package_element)
         mock_identify.assert_called_once_with(mock_generator.return_value)
         self.assertTrue(presto_file.closed)
 
     @mock.patch('__builtin__.open', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     def test_closes_file_on_exception(self, mock_generator, mock_open):
         presto_file = StringIO()
         mock_open.return_value = presto_file
-        self.metadata_files.metadata[presto.METADATA_FILE_NAME] = {'local_path': '/path/to/presto'}
+        self.metadata_files.metadata[presto.METADATA_FILE_NAMES[0]] = \
+            {'local_path': '/path/to/presto'}
         mock_generator.side_effect = ValueError
 
         self.assertRaises(ValueError, self.reposync._decide_drpms_to_download,
@@ -501,8 +569,10 @@ class TestDownload(BaseSyncTest):
             spec_set=self.metadata_files.get_metadata_file_handle,
             side_effect=StringIO,
         )
+        # The 2nd/3rd calls are for the prestodelta, deltaninfo files
         mock_package_list_generator.side_effect = iter([model_factory.rpm_models(3),
-                                                    model_factory.drpm_models(3)])
+                                                        model_factory.drpm_models(3),
+                                                        None])
 
         report = self.reposync.download(self.metadata_files, set(), set())
 
@@ -511,74 +581,103 @@ class TestDownload(BaseSyncTest):
         self.assertEqual(report.removed_count, 0)
         self.assertEqual(report.updated_count, 0)
 
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.nectar_factory.create_downloader', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.alternate.ContentContainer')
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.nectar_factory.create_downloader',
+                autospec=True)
     @mock.patch.object(packages, 'package_list_generator', autospec=True)
-    def test_rpms_to_download(self, mock_package_list_generator, mock_create_downloader):
+    def test_rpms_to_download(self, mock_package_list_generator, mock_create_downloader,
+                              mock_container):
         """
         test with only RPMs specified to download
         """
         file_handle = StringIO()
         self.metadata_files.get_metadata_file_handle = mock.MagicMock(
             spec_set=self.metadata_files.get_metadata_file_handle,
-            side_effect=[file_handle, None], # None means it will skip DRPMs
+            side_effect=[file_handle, None, None],  # None means it will skip DRPMs
         )
         rpms = model_factory.rpm_models(3)
         for rpm in rpms:
             rpm.metadata['relativepath'] = self.RELATIVEPATH
+            # for this mock data, relativepath is already the same as
+            # os.path.basename(relativepath)
+            rpm.metadata['filename'] = self.RELATIVEPATH
         mock_package_list_generator.return_value = rpms
         self.downloader.download = mock.MagicMock(spec_set=self.downloader.download)
         mock_create_downloader.return_value = self.downloader
 
+        fake_container = mock.Mock()
+        fake_container.refresh.return_value = {}
+        mock_container.return_value = fake_container
+
         # call download, passing in only two of the 3 rpms as units we want
-        report = self.reposync.download(self.metadata_files, set(m.as_named_tuple for m in rpms[:2]), set())
+        self.reposync.download(self.metadata_files,
+                               set(m.as_named_tuple for m in rpms[:2]), set())
 
         # make sure we skipped DRPMs
-        self.assertEqual(self.downloader.download.call_count, 1)
+        self.assertEqual(self.downloader.download.call_count, 0)
         self.assertEqual(mock_package_list_generator.call_count, 1)
 
         # verify that the download requests were correct
-        requests = list(self.downloader.download.call_args[0][0])
+        requests = list(fake_container.download.call_args[0][2])
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0].url, os.path.join(self.url, self.RELATIVEPATH))
-        self.assertEqual(requests[0].destination, os.path.join(self.reposync.tmp_dir, self.RELATIVEPATH))
+        self.assertEqual(requests[0].destination,
+                         os.path.join(self.reposync.tmp_dir, self.RELATIVEPATH))
         self.assertTrue(requests[0].data is rpms[0])
         self.assertEqual(requests[1].url, os.path.join(self.url, self.RELATIVEPATH))
-        self.assertEqual(requests[1].destination, os.path.join(self.reposync.tmp_dir, self.RELATIVEPATH))
+        self.assertEqual(requests[1].destination,
+                         os.path.join(self.reposync.tmp_dir, self.RELATIVEPATH))
         self.assertTrue(requests[1].data is rpms[1])
         self.assertTrue(file_handle.closed)
 
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.nectar_factory.create_downloader', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.alternate.ContentContainer')
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.nectar_factory.create_downloader',
+                autospec=True)
     @mock.patch.object(packages, 'package_list_generator', autospec=True)
-    def test_drpms_to_download(self, mock_package_list_generator, mock_create_downloader):
+    def test_drpms_to_download(self, mock_package_list_generator, mock_create_downloader,
+                               mock_container):
         """
         test with only DRPMs specified to download
         """
         file_handle = StringIO()
         self.metadata_files.get_metadata_file_handle = mock.MagicMock(
             spec_set=self.metadata_files.get_metadata_file_handle,
-            side_effect=[StringIO(), file_handle],
+            # The second and third time this method is called are to get the deltainfo/prestodelta
+            # files
+            side_effect=[StringIO(), file_handle, file_handle],
         )
         drpms = model_factory.drpm_models(3)
         for drpm in drpms:
             drpm.metadata['relativepath'] = ''
-        mock_package_list_generator.side_effect = iter([[], drpms])
+
+        # including drpms twice catches both possible prestodelta file names
+        mock_package_list_generator.side_effect = iter([[], drpms, drpms])
         self.downloader.download = mock.MagicMock(spec_set=self.downloader.download)
         mock_create_downloader.return_value = self.downloader
 
-        # call download, passing in only two of the 3 rpms as units we want
-        report = self.reposync.download(self.metadata_files, set(), set(m.as_named_tuple for m in drpms[:2]))
+        fake_container = mock.Mock()
+        fake_container.refresh.return_value = {}
+        mock_container.return_value = fake_container
 
+        # call download, passing in only two of the 3 rpms as units we want
+        self.reposync.download(self.metadata_files, set(),
+                               set(m.as_named_tuple for m in drpms[:2]))
+
+        # check download call twice since each drpm metadata file referenced 1 drpm
         self.assertEqual(self.downloader.download.call_count, 2)
-        self.assertEqual(mock_package_list_generator.call_count, 2)
+        # Package list generator gets called 3 time, once for the rpms and twice for drpms
+        self.assertEqual(mock_package_list_generator.call_count, 3)
 
         # verify that the download requests were correct
         requests = list(self.downloader.download.call_args[0][0])
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0].url, os.path.join(self.url, drpms[0].filename))
-        self.assertEqual(requests[0].destination, os.path.join(self.reposync.tmp_dir, drpms[0].filename))
+        self.assertEqual(requests[0].destination,
+                         os.path.join(self.reposync.tmp_dir, drpms[0].filename))
         self.assertTrue(requests[0].data is drpms[0])
         self.assertEqual(requests[1].url, os.path.join(self.url, drpms[1].filename))
-        self.assertEqual(requests[1].destination, os.path.join(self.reposync.tmp_dir, drpms[1].filename))
+        self.assertEqual(requests[1].destination,
+                         os.path.join(self.reposync.tmp_dir, drpms[1].filename))
         self.assertTrue(requests[1].data is drpms[1])
         self.assertTrue(file_handle.closed)
 
@@ -658,11 +757,11 @@ class TestGetErrata(BaseSyncTest):
         mock_save.assert_called_once_with(self.reposync,
                                           mock_get.return_value,
                                           updateinfo.PACKAGE_TAG,
-                                          updateinfo.process_package_element)
+                                          updateinfo.process_package_element,
+                                          additive_type=True)
 
 
 class TestGetCompsFileUnits(BaseSyncTest):
-
     @mock.patch.object(RepoSync, 'save_fileless_units', autospec=True)
     def test_no_metadata(self, mock_save):
         self.reposync.get_comps_file_units(self.metadata_files, mock.Mock(), "foo")
@@ -718,10 +817,15 @@ class TestGetCompsFileUnits(BaseSyncTest):
 
 class TestSaveFilelessUnits(BaseSyncTest):
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
-    def test_save_erratas_none_existing(self, mock_generator, mock_check_repo):
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
+    def test_save_fileless_units(self, mock_generator, mock_check_repo):
         """
-        test where no errata already exist, so all should be saved
+        test the "base" use case for save_fileless_units.
+
+        Note that we are using errata as the unit here, but errata are typically
+        saved with "additive_type" set to True.
+
         """
         errata = tuple(model_factory.errata_models(3))
         mock_generator.return_value = errata
@@ -730,9 +834,11 @@ class TestSaveFilelessUnits(BaseSyncTest):
         self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
         file_handle = StringIO()
 
-        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
+        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG,
+                                          updateinfo.process_package_element)
 
-        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
+        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG,
+                                       updateinfo.process_package_element)
         self.assertEqual(mock_generator.call_count, 2)
         self.assertEqual(mock_check_repo.call_count, 1)
         self.assertEqual(list(mock_check_repo.call_args[0][0]), [g.as_named_tuple for g in errata])
@@ -743,34 +849,118 @@ class TestSaveFilelessUnits(BaseSyncTest):
         self.conduit.save_unit.assert_any_call(self.conduit.init_unit.return_value)
         self.assertEqual(self.conduit.save_unit.call_count, 3)
 
-    @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
-    def test_save_erratas_some_existing(self, mock_generator, mock_check_repo):
+    def test_save_fileless_units_bad_args(self):
         """
-        test where some errata already exist, so only some should be saved
+        Ensure that an error is raised if save_fileless_units is called with
+        mutually exclusive args
+        """
+        self.assertRaises(PulpCodedException, self.reposync.save_fileless_units,
+                          None, None, None, mutable_type=True, additive_type=True)
+
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.'
+                'package_list_generator', autospec=True)
+    @mock.patch('pulp.plugins.conduits.mixins.SearchUnitsMixin.'
+                'find_unit_by_unit_key', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._concatenate_units', autospec=True)
+    def test_save_erratas_none_existing(self, mock_concat, mock_find_unit, mock_generator):
+        """
+        test where no errata already exist, so all should be saved
         """
         errata = tuple(model_factory.errata_models(3))
         mock_generator.return_value = errata
-        mock_check_repo.return_value = [g.as_named_tuple for g in errata[:2]]
         self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
         self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
+        # all of these units are new, find_unit_by_unit_key will return None
+        mock_find_unit.return_value = None
         file_handle = StringIO()
 
-        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
+        # errata are saved with the "additive=True" flag
+        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG,
+                                          updateinfo.process_package_element, additive_type=True)
 
-        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
-        self.assertEqual(mock_generator.call_count, 2)
-        self.assertEqual(mock_check_repo.call_count, 1)
-        self.assertEqual(list(mock_check_repo.call_args[0][0]), [g.as_named_tuple for g in errata])
-        self.assertEqual(mock_check_repo.call_args[0][1], self.conduit.get_units)
+        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG,
+                                       updateinfo.process_package_element)
+        self.assertEqual(mock_generator.call_count, 1)
 
-        for model in errata[:2]:
+        for model in errata:
             self.conduit.init_unit.assert_any_call(model.TYPE, model.unit_key, model.metadata, None)
         self.conduit.save_unit.assert_any_call(self.conduit.init_unit.return_value)
-        self.assertEqual(self.conduit.save_unit.call_count, 2)
+        self.assertEqual(self.conduit.save_unit.call_count, 3)
+
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.'
+                'package_list_generator', autospec=True)
+    @mock.patch('pulp.plugins.conduits.mixins.SearchUnitsMixin.'
+                'find_unit_by_unit_key', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._concatenate_units', autospec=True)
+    def test_save_erratas_some_existing(self, mock_concat, mock_find_unit, mock_generator):
+        """
+        test where some errata already exist. When "additive_type" is set, we
+        will always init and save a unit since it may have been modified.
+        """
+        errata = tuple(model_factory.errata_models(3))
+        mock_generator.return_value = errata
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
+        # all of these units are new, find_unit_by_unit_key will return None
+        mock_find_unit.return_value = None
+        file_handle = StringIO()
+
+        find_unit_retvals = [mock.Mock(), None, mock.Mock()]
+
+        def _find_unit_return(*args):
+            return find_unit_retvals.pop()
+
+        mock_find_unit.side_effect = _find_unit_return
+
+        concat_unit_retvals = ["fake-unit-b", "fake-unit-a"]
+
+        def _concat_unit_return(*args):
+            return concat_unit_retvals.pop()
+
+        mock_concat.side_effect = _concat_unit_return
+
+        # errata are saved with the "additive=True" flag
+        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG,
+                                          updateinfo.process_package_element, additive_type=True)
+
+        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG,
+                                       updateinfo.process_package_element)
+        # the generator is called only once since we are not rewinding the file
+        # handle or checking the repo for existing elements.
+        self.assertEqual(mock_generator.call_count, 1)
+
+        for model in errata:
+            self.conduit.init_unit.assert_any_call(model.TYPE, model.unit_key, model.metadata, None)
+
+        self.conduit.save_unit.assert_any_call("fake-unit-a")
+        self.conduit.save_unit.assert_any_call("fake-unit-b")
+        self.conduit.save_unit.assert_any_call(self.conduit.init_unit.return_value)
+        self.assertEqual(self.conduit.save_unit.call_count, 3)
+
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.'
+                'package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._concatenate_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.mixins.SearchUnitsMixin.'
+                'find_unit_by_unit_key', autospec=True)
+    def test_save_erratas_update_pkglist(self, mock_find_unit, mock_concat, mock_generator):
+        """
+        test that we call _concatenate_units when we find an existing errata
+        """
+        errata = tuple(model_factory.errata_models(3))
+        mock_generator.return_value = errata
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
+        mock_find_unit.return_value = "fake unit"
+        file_handle = StringIO()
+
+        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG,
+                                          updateinfo.process_package_element, additive_type=True)
+
+        self.assertEqual(mock_concat.call_count, 3)
 
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator',
+                autospec=True)
     def test_save_groups_some_existing(self, mock_generator, mock_check_repo):
         """
         test where some groups already exist, and make sure all of them are
@@ -797,10 +987,15 @@ class TestSaveFilelessUnits(BaseSyncTest):
         self.assertEqual(self.conduit.save_unit.call_count, 3)
 
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.check_repo', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.package_list_generator', autospec=True)
-    def test_save_erratas_all_existing(self, mock_generator, mock_check_repo):
+    @mock.patch('pulp_rpm.plugins.importers.yum.repomd.packages.'
+                'package_list_generator', autospec=True)
+    @mock.patch('pulp.plugins.conduits.mixins.SearchUnitsMixin.'
+                'find_unit_by_unit_key', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.sync.RepoSync._concatenate_units', autospec=True)
+    def test_save_erratas_all_existing(self, mock_concat, mock_find_unit, mock_generator,
+                                       mock_check_repo):
         """
-        test where all errata already exist, so none should be saved
+        test where all errata already exist
         """
         errata = tuple(model_factory.errata_models(3))
         mock_generator.return_value = errata
@@ -809,15 +1004,162 @@ class TestSaveFilelessUnits(BaseSyncTest):
         self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
         file_handle = StringIO()
 
-        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
+        self.reposync.save_fileless_units(file_handle, updateinfo.PACKAGE_TAG,
+                                          updateinfo.process_package_element, additive_type=True)
 
-        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG, updateinfo.process_package_element)
-        self.assertEqual(mock_generator.call_count, 2)
-        self.assertEqual(mock_check_repo.call_count, 1)
-        self.assertEqual(list(mock_check_repo.call_args[0][0]), [g.as_named_tuple for g in errata])
-        self.assertEqual(mock_check_repo.call_args[0][1], self.conduit.get_units)
+        mock_generator.assert_any_call(file_handle, updateinfo.PACKAGE_TAG,
+                                       updateinfo.process_package_element)
+        self.assertEqual(mock_generator.call_count, 1)
 
-        self.assertEqual(self.conduit.save_unit.call_count, 0)
+        self.assertEqual(self.conduit.save_unit.call_count, 3)
+
+    def test_concatenate_units_wrong_type_id(self):
+        """
+        Ensure that we get an exception if we try to concatenate units of different types!
+        """
+        mock_erratum_model = models.Errata('RHBA-1234', metadata={})
+        mock_existing_unit = Unit(ids.TYPE_ID_ERRATA, mock_erratum_model.unit_key,
+                                  mock_erratum_model.metadata, "/fake/path")
+
+        mock_dist_model = models.Distribution('fake family', 'server', '3.11',
+                                              'baroque', metadata={})
+        mock_new_unit = Unit(ids.TYPE_ID_DISTRO, mock_dist_model.unit_key,
+                             mock_dist_model.metadata, "/fake/path")
+
+        self.assertRaises(PulpCodedException, self.reposync._concatenate_units,
+                          mock_existing_unit, mock_new_unit)
+
+    def test_concatenate_units_wrong_unit_keys(self):
+        """
+        Ensure that we get an exception if we try to concatenate units with different unit_keys.
+        """
+        mock_existing_erratum_model = models.Errata('RHBA-1234', metadata={})
+        mock_existing_unit = Unit(ids.TYPE_ID_ERRATA, mock_existing_erratum_model.unit_key,
+                                  mock_existing_erratum_model.metadata, "/fake/path")
+
+        mock_new_erratum_model = models.Errata('RHBA-5678', metadata={})
+        mock_new_unit = Unit(ids.TYPE_ID_ERRATA, mock_new_erratum_model.unit_key,
+                             mock_new_erratum_model.metadata, "/fake/path")
+
+        self.assertRaises(PulpCodedException, self.reposync._concatenate_units,
+                          mock_existing_unit, mock_new_unit)
+
+    def test_concatenate_units_unsupported_type(self):
+        """
+        Ensure that we get an exception if we try to concatenate unsupported units
+        """
+        mock_existing_dist_model = models.Distribution('fake family', 'server', '3.11',
+                                                       'baroque', metadata={})
+        mock_existing_dist_unit = Unit(ids.TYPE_ID_DISTRO, mock_existing_dist_model.unit_key,
+                                       mock_existing_dist_model.metadata, "/fake/path")
+        mock_new_dist_model = models.Distribution('fake family', 'server', '3.11',
+                                                  'baroque', metadata={})
+        mock_new_dist_unit = Unit(ids.TYPE_ID_DISTRO, mock_new_dist_model.unit_key,
+                                  mock_new_dist_model.metadata, "/fake/path")
+
+        self.assertRaises(PulpCodedException, self.reposync._concatenate_units,
+                          mock_existing_dist_unit, mock_new_dist_unit)
+
+    def test_concatenate_units_errata(self):
+        """
+        Ensure that concatenation works
+        """
+        mock_existing_erratum_pkglist = [{'packages': [{"name": "some_package v1"},
+                                                       {"name": "another_package v1"}],
+                                          'name': 'v1 packages'}]
+        mock_existing_erratum_model = models.Errata(
+            'RHBA-1234', metadata={'pkglist': mock_existing_erratum_pkglist})
+        mock_existing_unit = Unit(ids.TYPE_ID_ERRATA, mock_existing_erratum_model.unit_key,
+                                  mock_existing_erratum_model.metadata, "/fake/path")
+
+        mock_new_erratum_pkglist = [{'packages': [{"name": "some_package v2"},
+                                                  {"name": "another_package v2"}],
+                                     'name': 'v2 packages'}]
+        mock_new_erratum_model = models.Errata('RHBA-1234',
+                                               metadata={'pkglist': mock_new_erratum_pkglist})
+        mock_new_unit = Unit(ids.TYPE_ID_ERRATA, mock_new_erratum_model.unit_key,
+                             mock_new_erratum_model.metadata, "/fake/path")
+
+        concat_unit = self.reposync._concatenate_units(mock_existing_unit, mock_new_unit)
+
+        self.assertEquals(concat_unit.metadata, {'pkglist':
+                                                 [{'packages': [{'name': 'some_package v1'},
+                                                                {'name': 'another_package v1'}],
+                                                   'name': 'v1 packages'},
+                                                  {'packages': [{'name': 'some_package v2'},
+                                                                {'name': 'another_package v2'}],
+                                                   'name': 'v2 packages'}],
+                                                 'pulp_user_metadata': {}})
+
+    def test_concatenate_units_errata_same_errata(self):
+        """
+        Ensure that we do not alter existing package lists when there is no new info
+        """
+        mock_existing_erratum_pkglist = [{'packages': [{"name": "some_package v1"},
+                                                       {"name": "another_package v1"}],
+                                          'name': 'v1 packages'}]
+        mock_existing_erratum_model = models.Errata('RHBA-1234',
+                                                    metadata={'pkglist':
+                                                              mock_existing_erratum_pkglist})
+        mock_existing_unit = Unit(ids.TYPE_ID_ERRATA, mock_existing_erratum_model.unit_key,
+                                  mock_existing_erratum_model.metadata, "/fake/path")
+
+        # new erratum has the same package list and same ID
+        mock_new_erratum_pkglist = [{'packages': [{"name": "some_package v1"},
+                                                  {"name": "another_package v1"}],
+                                     'name': 'v1 packages'}]
+
+        mock_new_erratum_model = models.Errata('RHBA-1234', metadata={'pkglist':
+                                                                      mock_new_erratum_pkglist})
+        mock_new_unit = Unit(ids.TYPE_ID_ERRATA, mock_new_erratum_model.unit_key,
+                             mock_new_erratum_model.metadata, "/fake/path")
+
+        concat_unit = self.reposync._concatenate_units(mock_existing_unit, mock_new_unit)
+
+        print concat_unit.metadata
+        self.assertEquals(concat_unit.metadata,
+                          {'pkglist': [{'packages': [{'name': 'some_package v1'},
+                                                     {'name': 'another_package v1'}],
+                                        'name': 'v1 packages'}],
+                           'pulp_user_metadata': {}})
+
+    def test_concatenate_units_errata_avoid_double_concat(self):
+        """
+        Ensure that we do not append a package list to an errata a second time
+        """
+        mock_existing_erratum_pkglist = [{'packages': [{'name': 'some_package v1'},
+                                                       {'name': 'another_package v1'}],
+                                          'name': 'v1 packages'},
+                                         {'packages': [{'name': 'some_package v2'},
+                                                       {'name': 'another_package v2'}],
+                                          'name': 'v2 packages'}]
+
+        mock_existing_erratum_model = models.Errata('RHBA-1234',
+                                                    metadata={'pkglist':
+                                                              mock_existing_erratum_pkglist})
+        mock_existing_unit = Unit(ids.TYPE_ID_ERRATA, mock_existing_erratum_model.unit_key,
+                                  mock_existing_erratum_model.metadata, "/fake/path")
+
+        # new erratum has a subset of what we already know
+        mock_new_erratum_pkglist = [{'packages': [{"name": "some_package v1"},
+                                                  {"name": "another_package v1"}],
+                                     'name': 'v1 packages'}]
+
+        mock_new_erratum_model = models.Errata('RHBA-1234',
+                                               metadata={'pkglist': mock_new_erratum_pkglist})
+        mock_new_unit = Unit(ids.TYPE_ID_ERRATA, mock_new_erratum_model.unit_key,
+                             mock_new_erratum_model.metadata, "/fake/path")
+
+        concat_unit = self.reposync._concatenate_units(mock_existing_unit, mock_new_unit)
+
+        self.assertEquals(concat_unit.metadata,
+                          {'pkglist': [{'packages': [{'name': 'some_package v1'},
+                                                     {'name': 'another_package v1'}],
+                                        'name': 'v1 packages'},
+                                       {'packages': [{'name': 'some_package v2'},
+                                                     {'name': 'another_package v2'}],
+                                        'name': 'v2 packages'}],
+                           'pulp_user_metadata': {}})
 
 
 class TestIdentifyWantedVersions(BaseSyncTest):
@@ -885,3 +1227,254 @@ class TestFilteredUnitGenerator(BaseSyncTest):
 
         # make sure we only got the ones we want
         self.assertEqual(result, units[:2])
+
+
+class TestAlreadyDownloadedUnits(BaseSyncTest):
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_rpms_check_all_and_associate_positive(self, mock_isfile, mock_save,
+                                                   mock_search_all_units):
+        units = model_factory.rpm_models(3)
+        mock_search_all_units.return_value = units
+        mock_isfile.return_value = True
+        input_units = set([unit.as_named_tuple for unit in units])
+        for unit in units:
+            unit.metadata['filename'] = 'test-filename'
+            unit.storage_path = "existing_storage_path"
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 0)
+        # verify we are saving the storage path
+        for c in mock_save.mock_calls:
+            (conduit, unit) = c[1]
+            self.assertEquals(unit.storage_path, "existing_storage_path")
+
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_rpms_check_all_and_associate_negative(self, mock_isfile, mock_save,
+                                                   mock_search_all_units):
+        mock_search_all_units.return_value = []
+        mock_isfile.return_value = True
+        units = model_factory.rpm_models(3)
+        input_units = set([unit.as_named_tuple for unit in units])
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 3)
+
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_srpms_check_all_and_associate_positive(self, mock_isfile, mock_save,
+                                                    mock_search_all_units):
+        units = model_factory.srpm_models(3)
+        mock_search_all_units.return_value = units
+        mock_isfile.return_value = True
+        input_units = set([unit.as_named_tuple for unit in units])
+        for unit in units:
+            unit.metadata['filename'] = 'test-filename'
+            unit.storage_path = "existing_storage_path"
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 0)
+
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_srpms_check_all_and_associate_negative(self, mock_isfile, mock_save,
+                                                    mock_search_all_units):
+        mock_search_all_units.return_value = []
+        mock_isfile.return_value = True
+        units = model_factory.srpm_models(3)
+        input_units = set([unit.as_named_tuple for unit in units])
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 3)
+
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_drpms_check_all_and_associate_positive(self, mock_isfile, mock_save,
+                                                    mock_search_all_units):
+        units = model_factory.drpm_models(3)
+        mock_search_all_units.return_value = units
+        mock_isfile.return_value = True
+        input_units = set([unit.as_named_tuple for unit in units])
+        for unit in units:
+            unit.metadata['filename'] = 'test-filename'
+            unit.storage_path = "existing_storage_path"
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 0)
+
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.search_all_units', autospec=True)
+    @mock.patch('pulp.plugins.conduits.repo_sync.RepoSyncConduit.save_unit', autospec=True)
+    @mock.patch('os.path.isfile', autospec=True)
+    def test_drpms_check_all_and_associate_negative(self, mock_isfile, mock_save,
+                                                    mock_search_all_units):
+        mock_search_all_units.return_value = []
+        mock_isfile.return_value = True
+        units = model_factory.drpm_models(3)
+        input_units = set([unit.as_named_tuple for unit in units])
+        result = check_all_and_associate(input_units, self.conduit)
+        self.assertEqual(len(list(result)), 3)
+
+
+class TestTreeinfoAlterations(BaseSyncTest):
+    TREEINFO_NO_REPOMD = """
+[general]
+name = Some-treeinfo
+family = mockdata
+
+[stage2]
+mainimage = LiveOS/squashfs.img
+
+[images-x86_64]
+kernel = images/pxeboot/vmlinuz
+initrd = images/pxeboot/initrd.img
+
+[checksums]
+images/efiboot.img = sha256:12345
+"""
+    TREEINFO_WITH_REPOMD = """
+[general]
+name = Some-treeinfo
+family = mockdata
+
+[stage2]
+mainimage = LiveOS/squashfs.img
+
+[images-x86_64]
+kernel = images/pxeboot/vmlinuz
+initrd = images/pxeboot/initrd.img
+
+[checksums]
+images/efiboot.img = sha256:12345
+repodata/repomd.xml = sha256:9876
+"""
+
+    @mock.patch('__builtin__.open', autospec=True)
+    def test_treeinfo_unaltered(self, mock_open):
+        mock_file = mock.MagicMock(spec=file)
+        mock_file.readlines.return_value = StringIO(self.TREEINFO_NO_REPOMD).readlines()
+        mock_context = mock.MagicMock()
+        mock_context.__enter__.return_value = mock_file
+        mock_open.return_value = mock_context
+        treeinfo.strip_treeinfo_repomd("/mock/treeinfo/path")
+
+        mock_file.writelines.assert_called_once_with(['\n', '[general]\n', 'name = Some-treeinfo\n',
+                                                      'family = mockdata\n', '\n', '[stage2]\n',
+                                                      'mainimage = LiveOS/squashfs.img\n', '\n',
+                                                      '[images-x86_64]\n',
+                                                      'kernel = images/pxeboot/vmlinuz\n',
+                                                      'initrd = images/pxeboot/initrd.img\n',
+                                                      '\n', '[checksums]\n',
+                                                      'images/efiboot.img = sha256:12345\n'])
+
+    @mock.patch('__builtin__.open', autospec=True)
+    def test_treeinfo_altered(self, mock_open):
+        mock_file = mock.MagicMock(spec=file)
+        mock_file.readlines.return_value = StringIO(self.TREEINFO_WITH_REPOMD).readlines()
+        mock_context = mock.MagicMock()
+        mock_context.__enter__.return_value = mock_file
+        mock_open.return_value = mock_context
+        treeinfo.strip_treeinfo_repomd("/mock/treeinfo/path")
+
+        mock_file.writelines.assert_called_once_with(['\n', '[general]\n', 'name = Some-treeinfo\n',
+                                                      'family = mockdata\n', '\n', '[stage2]\n',
+                                                      'mainimage = LiveOS/squashfs.img\n', '\n',
+                                                      '[images-x86_64]\n',
+                                                      'kernel = images/pxeboot/vmlinuz\n',
+                                                      'initrd = images/pxeboot/initrd.img\n',
+                                                      '\n', '[checksums]\n',
+                                                      'images/efiboot.img = sha256:12345\n'])
+
+
+# these tests are specifically to test bz #1150714
+@mock.patch('os.chmod', autospec=True)
+@mock.patch('shutil.move', autospec=True)
+@mock.patch('pulp_rpm.plugins.importers.yum.parse.treeinfo.get_treefile', autospec=True)
+@mock.patch('pulp_rpm.plugins.importers.yum.parse.treeinfo.parse_treefile', autospec=True)
+@mock.patch('pulp_rpm.plugins.importers.yum.report.DistributionReport', autospec=True)
+@mock.patch('shutil.rmtree', autospec=True)
+@mock.patch('tempfile.mkdtemp', autospec=True)
+@mock.patch('pulp_rpm.plugins.importers.yum.repomd.nectar_factory.create_downloader', autospec=True)
+class TestTreeinfoSync(BaseSyncTest):
+    def setUp(self, *mocks):
+        super(TestTreeinfoSync, self).setUp()
+        self.conduit.remove_unit = mock.MagicMock(spec_set=self.conduit.remove_unit)
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.save_unit = mock.MagicMock(spec_set=self.conduit.save_unit)
+
+    # This is the case when we are syncing for the first time, or a treeinfo
+    # appeared for the first time
+    def test_treeinfo_sync_no_unit_removal(self, mock_nectar, mock_tempfile, mock_rmtree,
+                                           mock_report, mock_parse_treefile, mock_get_treefile,
+                                           mock_move, mock_chmod):
+        mock_model = models.Distribution('fake family', 'server', '3.11', 'baroque', metadata={})
+        mock_parse_treefile.return_value = (mock_model, ["fake file 1"])
+        mock_get_treefile.return_value = "/a/fake/path/to/the/treefile"
+        treeinfo.sync(self.conduit, "http://some/url", "/some/tempdir", "fake-nectar-conf",
+                      mock_report, lambda x: x)
+        self.assertEqual(self.conduit.remove_unit.call_count, 0)
+
+    # The "usual" case of one existing distribution unit on the repo. Ensure
+    # that we didn't try to remove anything.
+    def test_treeinfo_sync_one_unit_removal(self, mock_nectar, mock_tempfile, mock_rmtree,
+                                            mock_report, mock_parse_treefile, mock_get_treefile,
+                                            mock_move, mock_chmod):
+        # return one unit that is the same as what we saved. No removal should occur
+        mock_model = models.Distribution('fake family', 'server', '3.11', 'baroque', metadata={})
+        mock_unit = Unit(ids.TYPE_ID_DISTRO, mock_model.unit_key, mock_model.metadata, "/fake/path")
+        self.conduit.get_units = mock.MagicMock(spec_set=self.conduit.get_units)
+        self.conduit.get_units.return_value = [mock_unit]
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.init_unit.return_value = mock_unit
+        mock_parse_treefile.return_value = (mock_model, ["fake file 1"])
+        mock_get_treefile.return_value = "/a/fake/path/to/the/treefile"
+        treeinfo.sync(self.conduit, "http://some/url", "/some/tempdir", "fake-nectar-conf",
+                      mock_report, lambda x: x)
+        self.assertEqual(self.conduit.remove_unit.call_count, 0)
+
+    # The "usual" case of one existing distribution unit on the repo. Ensure
+    # that we didn't try to remove anything.
+    def test_treeinfo_sync_unchanged(self, mock_nectar, mock_tempfile, mock_rmtree,
+                                     mock_report, mock_parse_treefile, mock_get_treefile,
+                                     mock_move, mock_chmod):
+        # return one unit that is the same as what we saved. No removal should occur
+        metadata = {treeinfo.KEY_TIMESTAMP: 1354213090.94}
+        mock_model = models.Distribution('fake family', 'server', '3.11', 'baroque',
+                                         metadata=metadata.copy())
+        mock_unit = Unit(ids.TYPE_ID_DISTRO, mock_model.unit_key, metadata.copy(),
+                         "/fake/path")
+        self.conduit.get_units = mock.MagicMock(spec_set=self.conduit.get_units)
+        self.conduit.get_units.return_value = [mock_unit]
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.init_unit.return_value = mock_unit
+        mock_parse_treefile.return_value = (mock_model, ["fake file 1"])
+        mock_get_treefile.return_value = "/a/fake/path/to/the/treefile"
+        treeinfo.sync(self.conduit, "http://some/url", "/some/tempdir", "fake-nectar-conf",
+                      mock_report, lambda x: x)
+        self.assertEqual(self.conduit.remove_unit.call_count, 0)
+        mock_report.__setitem__.assert_called_once_with('state', constants.STATE_COMPLETE)
+        # make sure the workflow did not proceed by making sure this call didn't happen
+        self.assertEqual(mock_report.set_initial_values.call_count, 0)
+
+    # This is the case that occurs when symlinks like "6Server" are updated for
+    # a new release. Pulp will have created a new distribution unit and we need
+    # to remove any old units
+    def test_treeinfo_sync_two_unit_removal(self, mock_nectar, mock_tempfile, mock_rmtree,
+                                            mock_report, mock_parse_treefile, mock_get_treefile,
+                                            mock_move, mock_chmod):
+        # return one unit that is the same as what we saved. No removal should occur
+        mock_model = models.Distribution('fake family', 'server', '3.11', 'baroque', metadata={})
+        mock_model_old = models.Distribution('fake family', 'server', '3.10', 'baroque',
+                                             metadata={})
+        mock_unit = Unit(ids.TYPE_ID_DISTRO, mock_model.unit_key, mock_model.metadata, "/fake/path")
+        mock_unit_old = Unit(ids.TYPE_ID_DISTRO, mock_model_old.unit_key, mock_model_old.metadata,
+                             "/fake/path")
+        self.conduit.get_units = mock.MagicMock(spec_set=self.conduit.get_units)
+        self.conduit.get_units.return_value = [mock_unit, mock_unit_old]
+        self.conduit.init_unit = mock.MagicMock(spec_set=self.conduit.init_unit)
+        self.conduit.init_unit.return_value = mock_unit
+        mock_parse_treefile.return_value = (mock_model, ["fake file 1"])
+        mock_get_treefile.return_value = "/a/fake/path/to/the/treefile"
+        treeinfo.sync(self.conduit, "http://some/url", "/some/tempdir", "fake-nectar-conf",
+                      mock_report, lambda x: x)
+        self.conduit.remove_unit.assert_called_once_with(mock_unit_old)

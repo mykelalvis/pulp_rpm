@@ -1,6 +1,30 @@
 Configuration
 =============
 
+Yum Importer Configuration
+--------------------------
+
+The yum importer is configured by editing
+``/etc/pulp/server/plugins.conf.d/yum_importer.json``. This file must be valid `JSON`_.
+
+.. _JSON: http://json.org/
+
+The importer supports the settings documented in Pulp's `importer config docs`_.
+
+.. _importer config docs: https://pulp-user-guide.readthedocs.org/en/latest/server.html#importers
+
+ISO Importer Configuration
+--------------------------
+
+The ISO importer is configured by editing
+``/etc/pulp/server/plugins.conf.d/iso_importer.json``. This file must be valid `JSON`_.
+
+.. _JSON: http://json.org/
+
+The importer supports the settings documented in Pulp's `importer config docs`_.
+
+.. _importer config docs: https://pulp-user-guide.readthedocs.org/en/latest/server.html#importers
+
 Protected Repositories
 ----------------------
 
@@ -24,6 +48,18 @@ Two configuration file changes are necessary to enable repository authentication
 
 * Edit ``/etc/pulp/repo_auth.conf`` and set the ``enabled`` option to ``true``.
   Save the file and restart Apache.
+
+Validation With Your Web Server
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you are using the repository protection feature and if you do not require different certificate
+authorities on each repository, it is recommended that you configure your web server to validate
+client certificates against trusted certificate authorities instead of having Pulp do it. For
+Apache, please see their `documentation <https://httpd.apache.org/docs/2.2/mod/mod_ssl.html>`_ if
+you wish to learn how to do this. You can set the new ``verify_ssl`` setting to ``false`` in
+the ``[main]]`` section of ``/etc/pulp/repo_auth.conf`` if you wish to configure Pulp not to check
+the certificate signatures. There is a performance advantage to configuring this setting this way if
+you are able to use your web server to validate client certificates instead of Pulp.
 
 Global Repo Authentication
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -67,20 +103,3 @@ or ``update`` command using the following options respectively:
 * ``--feed-cert``
 * ``--feed-key``
 
-
-Certificate Revocation Lists
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Pulp supports the ability to honor Certificate Revocation Lists (CRLs).
-
-The directory in which CRLs are stored is configured through the
-``[crl] location`` attribute in ``/etc/pulp/repo_auth.conf``.
-
-CRLs must be named in a specific format. The name must be the CRL issuer's hash
-ending with the suffix of .r0, r1, etc.
-
-The recommended configuration is to copy the CRL to the specified CRL directory
-on the Pulp server as described above. Once the file is in place, create a symbolic
-link with the correct naming structure using the following command::
-
-  $ ln -s Example_CRL.pem `openssl crl -hash -noout -in Example_CRL.pem`.r0

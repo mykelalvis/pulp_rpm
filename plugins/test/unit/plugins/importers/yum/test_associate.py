@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import unittest
 
 import mock
@@ -21,8 +8,10 @@ from pulp.server.db.model.criteria import UnitAssociationCriteria
 import pulp.server.managers.factory as manager_factory
 
 import model_factory
-from pulp_rpm.common import models, constants
+from pulp_rpm.common import constants
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum import associate
+
 
 manager_factory.initialize()
 
@@ -55,7 +44,7 @@ class TestAssociate(unittest.TestCase):
         mock_copy_rpms.return_value = set(self.rpm_units)
 
         ret = associate.associate(self.source_repo, self.dest_repo, self.conduit,
-                            self.config, self.rpm_units)
+                                  self.config, self.rpm_units)
 
         self.assertEqual(set(ret), set(self.rpm_units))
 
@@ -126,28 +115,24 @@ class TestCopyRPMs(unittest.TestCase):
             conduit.associate_unit.assert_any_call(rpm)
 
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.get_existing_units', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.depsolve.find_dependent_rpms', autospec=True)
+    @mock.patch('pulp_rpm.plugins.importers.yum.depsolve.Solver.find_dependent_rpms', autospec=True)
     def test_with_existing_deps(self, mock_find, mock_get_existing):
         conduit = mock.MagicMock()
         rpms = model_factory.rpm_units(1)
-        deps = model_factory.rpm_models(2)
-        dep_units = [Unit(model.TYPE, model.unit_key, model.metadata, '') for model in deps]
-        mock_find.return_value = [r.as_named_tuple for r in deps]
-        mock_get_existing.return_value = dep_units
+        deps = model_factory.rpm_units(2)
+        mock_find.return_value = set(deps)
+        mock_get_existing.return_value = deps
 
         associate.copy_rpms(rpms, conduit, True)
 
         self.assertEqual(conduit.associate_unit.call_count, 1)
         self.assertEqual(mock_find.call_count, 1)
-        self.assertEqual(mock_find.call_args[0][0], set(rpms))
-        # called once directly, and once from filter_available_rpms
-        self.assertEqual(mock_get_existing.call_count, 2)
+        self.assertEqual(mock_find.call_args[0][1], set(rpms))
+        self.assertEqual(mock_get_existing.call_count, 1)
 
-
-    @mock.patch('pulp_rpm.plugins.importers.yum.associate.filter_available_rpms', autospec=True)
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.get_existing_units', autospec=True)
-    @mock.patch('pulp_rpm.plugins.importers.yum.depsolve.find_dependent_rpms', autospec=True)
-    def test_with_recursive_deps(self, mock_find, mock_get_existing, mock_filter):
+    @mock.patch('pulp_rpm.plugins.importers.yum.depsolve.Solver.find_dependent_rpms', autospec=True)
+    def test_with_recursive_deps(self, mock_find, mock_get_existing):
         """
         Test getting dependencies that do not exist in the repository already
         """
@@ -156,18 +141,14 @@ class TestCopyRPMs(unittest.TestCase):
         rpms = model_factory.rpm_units(1)
 
         # Create the recursive dependencies that we want to copy
-        deps = model_factory.rpm_models(2)
-        dep_units = [Unit(model.TYPE, model.unit_key, model.metadata, '') for model in deps]
+        deps = model_factory.rpm_units(2)
+        mock_find.side_effect = iter([set(deps), set()])
 
-        # the first call to filter gets all the dependencies for the parent repository
-        # The second time it is called during the recursion and all the units have already
-        # been copied.
-        mock_filter.side_effect = iter([dep_units, []])
         # The get existing units always assumes there are no units in the target repository
         mock_get_existing.return_value = []
         unit_set = associate.copy_rpms(rpms, conduit, True)
 
-        merged_set = set(dep_units)
+        merged_set = set(deps)
         merged_set.update(rpms)
         self.assertEquals(unit_set, merged_set)
 
@@ -288,13 +269,22 @@ class TestAssociateUnit(unittest.TestCase):
         self.assertTrue(ret is unit)
         self.assertEqual(mock_copyfile.call_count, 0)
 
+    def test_distribution(self):
+        unit = model_factory.drpm_units(1)[0]
+        mock_conduit = mock.MagicMock(spec_set=ImportUnitConduit)
+
+        ret = associate._associate_unit('repo2', mock_conduit, unit)
+
+        self.assertTrue(ret is unit)
+        mock_conduit.associate_unit.assert_called_once_with(unit)
+
     @mock.patch('shutil.copyfile')
     def test_yum_md_file(self, mock_copyfile):
         mock_conduit = mock.MagicMock(spec_set=ImportUnitConduit('', '', '', '', '', ''))
         model = model_factory.yum_md_file()
         unit = Unit(model.TYPE, model.unit_key, model.metadata, '/foo/bar')
 
-        ret = associate._associate_unit(self.repo, mock_conduit, unit)
+        associate._associate_unit(self.repo, mock_conduit, unit)
 
         expected_key = {'repo_id': self.repo.id, 'data_type': model.unit_key['data_type']}
         self.assertEqual(mock_conduit.init_unit.call_args[0][0], model.TYPE)
@@ -356,14 +346,15 @@ class TestGetRPMSToCopyByKey(unittest.TestCase):
         self.assertTrue(models.RPM.NAMEDTUPLE(**expected) in ret)
 
         mock_get_existing.assert_called_once_with(self.search_dicts, models.RPM.UNIT_KEY_NAMES,
-                                                  models.RPM.TYPE, self.conduit.get_destination_units)
+                                                  models.RPM.TYPE,
+                                                  self.conduit.get_destination_units)
 
 
 class TestGetRPMSToCopyByName(unittest.TestCase):
     RPM_NAMES = ('postfix', 'vim-common', 'python-mock')
 
     @mock.patch('pulp_rpm.plugins.importers.yum.existing.get_existing_units',
-               autospec=True, return_value=tuple())
+                autospec=True, return_value=tuple())
     def test_none_existing(self, mock_get_existing):
         mock_conduit = mock.MagicMock(spec_set=ImportUnitConduit('', '', '', '', '', ''))
 
@@ -372,7 +363,8 @@ class TestGetRPMSToCopyByName(unittest.TestCase):
         self.assertTrue(isinstance(ret, set))
         self.assertEqual(ret, set(self.RPM_NAMES))
         self.assertEqual(mock_get_existing.call_count, 1)
-        self.assertEqual(list(mock_get_existing.call_args[0][0]), list({'name': name} for name in self.RPM_NAMES))
+        self.assertEqual(list(mock_get_existing.call_args[0][0]),
+                         list({'name': name} for name in self.RPM_NAMES))
         self.assertEqual(mock_get_existing.call_args[0][1], models.RPM.UNIT_KEY_NAMES)
         self.assertEqual(mock_get_existing.call_args[0][2], models.RPM.TYPE)
         self.assertEqual(mock_get_existing.call_args[0][3], mock_conduit.get_destination_units)
@@ -386,7 +378,7 @@ class TestGetRPMSToCopyByName(unittest.TestCase):
             Unit(postfix.TYPE, postfix.unit_key, postfix.metadata, ''),
             Unit(vim.TYPE, vim.unit_key, vim.metadata, ''),
         ]
-        conduit = ImportUnitConduit('', '','', '', '', '')
+        conduit = ImportUnitConduit('', '', '', '', '', '')
         conduit.get_destination_units = mock.MagicMock(spec_set=conduit.get_destination_units,
                                                        return_value=existing)
 
@@ -394,16 +386,16 @@ class TestGetRPMSToCopyByName(unittest.TestCase):
 
         self.assertEqual(set(ret), set(['python-mock']))
         self.assertEqual(conduit.get_destination_units.call_count, 1)
-        self.assertTrue(isinstance(conduit.get_destination_units.call_args[0][0], UnitAssociationCriteria))
+        self.assertTrue(
+            isinstance(conduit.get_destination_units.call_args[0][0], UnitAssociationCriteria))
         self.assertEqual(conduit.get_destination_units.call_args[0][0].type_ids, [models.RPM.TYPE])
-        self.assertEqual(conduit.get_destination_units.call_args[0][0].unit_fields, models.RPM.UNIT_KEY_NAMES)
+        self.assertEqual(conduit.get_destination_units.call_args[0][0].unit_fields,
+                         models.RPM.UNIT_KEY_NAMES)
 
 
 class TestSafeCopyWithoutFile(unittest.TestCase):
-
     def test_metadata_clear_keys_prefixed_with_underscore(self):
         unit = model_factory.group_units(1)[0]
         unit.metadata['_foo'] = 'value'
         copied_unit = associate._safe_copy_unit_without_file(unit)
         self.assertEquals(None, copied_unit.metadata.get('_foo'))
-

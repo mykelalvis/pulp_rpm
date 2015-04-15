@@ -1,7 +1,5 @@
-Pulp RPM Support
-===================
-
-Contents:
+User Guide
+==========
 
 .. toctree::
    :maxdepth: 2
@@ -15,6 +13,7 @@ Contents:
    features
    isos
    faq
+   troubleshooting
 
 
 Indices and tables

@@ -1,17 +1,6 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software;
-# if not, see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
+import errno
 import os
+import shutil
 
 from pulp.common.config import read_json_config
 from pulp.plugins.distributor import Distributor
@@ -23,12 +12,10 @@ from pulp_rpm.common.ids import (
     TYPE_ID_PKG_CATEGORY, TYPE_ID_PKG_GROUP, TYPE_ID_RPM, TYPE_ID_SRPM,
     TYPE_ID_YUM_REPO_METADATA_FILE)
 from pulp_rpm.yum_plugin import util
-
 from . import configuration, publish
 
-# -- global constants ----------------------------------------------------------
 
-_LOG = util.getLogger(__name__)
+_logger = util.getLogger(__name__)
 
 CONF_FILE_PATH = 'server/plugins.conf.d/%s.json' % TYPE_ID_DISTRIBUTOR_YUM
 
@@ -40,14 +27,10 @@ DISTRIBUTOR_DISPLAY_NAME = 'Yum Distributor'
 # a hard coded constant.
 RELATIVE_URL = '/pulp/repos'
 
-# -- entry point ---------------------------------------------------------------
-
 
 def entry_point():
     config = read_json_config(CONF_FILE_PATH)
     return YumHTTPDistributor, config
-
-# -- distributor ---------------------------------------------------------------
 
 
 class YumHTTPDistributor(Distributor):
@@ -75,8 +58,6 @@ class YumHTTPDistributor(Distributor):
                           TYPE_ID_PKG_GROUP, TYPE_ID_PKG_CATEGORY, TYPE_ID_DISTRO,
                           TYPE_ID_YUM_REPO_METADATA_FILE]}
 
-    # -- repo lifecycle methods ------------------------------------------------
-
     def validate_config(self, repo, config, config_conduit):
         """
         Allows the distributor to check the contents of a potential configuration
@@ -98,22 +79,9 @@ class YumHTTPDistributor(Distributor):
         :return: tuple of (bool, str) to describe the result
         :rtype:  tuple
         """
-        _LOG.debug('Validating yum repository configuration: %s' % repo.id)
+        _logger.debug('Validating yum repository configuration: %s' % repo.id)
 
         return configuration.validate_config(repo, config, config_conduit)
-
-    def distributor_added(self, repo, config):
-        """
-        Called upon the successful addition of a distributor of this type to a
-        repository.
-
-        :param repo: metadata describing the repository
-        :type  repo: pulp.plugins.model.Repository
-
-        :param config: plugin configuration
-        :type  config: pulp.plugins.config.PluginCallConfiguration
-        """
-        pass
 
     def distributor_removed(self, repo, config):
         """
@@ -125,9 +93,61 @@ class YumHTTPDistributor(Distributor):
         :param config: plugin configuration
         :type  config: pulp.plugins.config.PluginCallConfiguration
         """
-        pass
 
-    # -- actions ---------------------------------------------------------------
+        # remove the directories that might have been created for this repo/distributor
+        repo_dir = configuration.get_master_publish_dir(repo, TYPE_ID_DISTRIBUTOR_YUM)
+        shutil.rmtree(repo_dir, ignore_errors=True)
+
+        # remove the symlinks that might have been created for this repo/distributor
+        http_publish_dir = configuration.get_http_publish_dir(config)
+        https_publish_dir = configuration.get_https_publish_dir(config)
+
+        for publish_dir in [http_publish_dir, https_publish_dir]:
+            symlink = os.path.join(publish_dir, configuration.get_repo_relative_path(repo, config))
+            symlink_without_trailing_slash = symlink.rstrip(os.sep)
+            try:
+                os.unlink(symlink_without_trailing_slash)
+            except OSError as error:
+                # If the symlink doesn't exist pass
+                if error.errno != errno.ENOENT:
+                    raise
+            else:
+                # Clean the directories that were hosted for this repo.
+                self.clean_simple_hosting_directories(symlink_without_trailing_slash, publish_dir)
+
+        # remove certificates for certificate based auth
+        configuration.remove_cert_based_auth(repo, config)
+
+    def clean_simple_hosting_directories(self, start_location, containing_dir):
+        """
+        Remove any orphaned directory structure left by the removal of a repo.
+
+        :param start_location: path of the symlink of the repo that was removed.
+        :type  start_location: str
+        :param containing_dir: path of the location of the base dir containing hosted repos
+        :type  containing_dir: str
+        """
+        up_dir = os.path.dirname(start_location)
+
+        # This function is potentially dangerous so it is important to restrict it to the
+        # publish directories.
+        if containing_dir not in os.path.dirname(up_dir):
+            return
+
+        # If the only file is the listing file, it is safe to delete the file and containing dir.
+        if os.listdir(up_dir) == ['listing']:
+            os.remove(os.path.join(up_dir, 'listing'))
+            try:
+                os.rmdir(up_dir)
+            except OSError:
+                # If this happened, there was a concurrency issue and it is no longer safe to
+                # remove the directory. It is possible that the concurrent operation created the
+                # listing file before this operation deleted it, so to be safe, we need to
+                # regenerate the listing file.
+                util.generate_listing_files(up_dir, up_dir)
+                return
+
+        self.clean_simple_hosting_directories(up_dir, containing_dir)
 
     def publish_repo(self, repo, publish_conduit, config):
         """
@@ -145,21 +165,16 @@ class YumHTTPDistributor(Distributor):
         :return: report describing the publish run
         :rtype:  pulp.plugins.model.PublishReport
         """
-        _LOG.debug('Publishing yum repository: %s' % repo.id)
+        _logger.debug('Publishing yum repository: %s' % repo.id)
 
-        self._publisher = publish.Publisher(repo, publish_conduit, config)
+        self._publisher = publish.Publisher(repo, publish_conduit, config, TYPE_ID_DISTRIBUTOR_YUM)
         return self._publisher.publish()
 
-    def cancel_publish_repo(self, call_request, call_report):
+    def cancel_publish_repo(self):
         """
         Call cancellation control hook.
-
-        :param call_request: call request for the call to cancel
-        :type call_request: pulp.server.dispatch.call.CallRequest
-        :param call_report: call report for the call to cancel
-        :type call_report: pulp.server.dispatch.call.CallReport
         """
-        _LOG.debug('Canceling yum repository publish')
+        _logger.debug('Canceling yum repository publish')
 
         self.canceled = True
         if self._publisher is not None:
@@ -185,13 +200,13 @@ class YumHTTPDistributor(Distributor):
         :return: dictionary of relevant data
         :rtype:  dict
         """
-        payload = {}
+        payload = dict()
         payload['repo_name'] = repo.display_name
         payload['server_name'] = pulp_server_config.get('server', 'server_name')
         ssl_ca_path = pulp_server_config.get('security', 'ssl_ca_certificate')
         try:
             payload['ca_cert'] = open(ssl_ca_path).read()
-        except Exception:
+        except (OSError, IOError):
             payload['ca_cert'] = config.get('https_ca')
 
         payload['relative_path'] = \

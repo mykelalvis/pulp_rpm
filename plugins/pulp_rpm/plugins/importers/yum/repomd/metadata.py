@@ -1,18 +1,8 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
 from copy import deepcopy
 import gdbm
+import bz2
 import gzip
 import hashlib
 import logging
@@ -24,9 +14,11 @@ from xml.etree.cElementTree import iterparse
 
 from nectar.listener import AggregatingEventListener
 from nectar.request import DownloadRequest
-from pulp_rpm.plugins.importers.yum import utils
+from pulp.plugins.util import verification
 
-from pulp_rpm.plugins.importers.yum.repomd import filelists, nectar_factory, other, packages
+from pulp_rpm.plugins.importers.yum import utils
+from pulp_rpm.plugins.importers.yum.parse.rpm import change_location_tag
+from pulp_rpm.plugins.importers.yum.repomd import filelists, nectar_factory, other
 from pulp_rpm.plugins.importers.yum.repomd.packages import package_list_generator
 
 
@@ -62,6 +54,7 @@ FILE_INFO_SKEL = {'name': None,
 
 # metadata files downloader, parser, and validator -----------------------------
 
+
 class MetadataFiles(object):
     """
     Stateful downloader, parser, and validator of the metadata files of a Yum
@@ -82,8 +75,10 @@ class MetadataFiles(object):
 
     Keys of interest:
 
-     * `primary`: path the primary.xml file containing the metadata of all packages in the repository
-     * `filelists`: path the filelists.xml file containing the files provided by all of the packages in the repository
+     * `primary`: path the primary.xml file containing the metadata of all packages in the
+     repository
+     * `filelists`: path the filelists.xml file containing the files provided by all of the
+     packages in the repository
      * `other`
      * `group`
      * `group_gz`
@@ -97,13 +92,16 @@ class MetadataFiles(object):
     :ivar metadata: dictionary of the main metadata type keys to the corresponding file paths
     """
 
-    # these are metadata file types listed in "repomd" that we do not want to
-    # store as units
+    # These are metadata file types listed in "repomd" that we do not want to store as units.
+    # deltainfo and susedata are SUSE specific files that we need to ignore for now, as there's no
+    # handling yet and copying them creates broken SUSE repos.
     KNOWN_TYPES = set(['group', 'group_gz',
-                   'filelists', 'filelists_db',
-                   'other', 'other_db',
-                   'primary', 'primary_db',
-                   'updateinfo', 'updateinfo_db'])
+                       'filelists', 'filelists_db',
+                       'other', 'other_db',
+                       'primary', 'primary_db',
+                       'deltainfo', 'susedata',
+                       'prestodelta',
+                       'updateinfo', 'updateinfo_db'])
 
     def __init__(self, repo_url, dst_dir, nectar_config):
         """
@@ -203,7 +201,8 @@ class MetadataFiles(object):
         # TODO: vet this method and determine if it should be used
         for md in self.metadata.values():
             if 'local_path' not in md:
-                raise RuntimeError('%s has not been downloaded' % md['relative_path'].rsplit('/', 1)[-1])
+                raise RuntimeError('%s has not been downloaded' %
+                                   md['relative_path'].rsplit('/', 1)[-1])
 
             if md['size'] is None:
                 raise RuntimeError('%s cannot be verified, no file size' % md['local_path'])
@@ -218,7 +217,8 @@ class MetadataFiles(object):
 
             hash_constructor = getattr(hashlib, md['checksum']['algorithm'], None)
             if hash_constructor is None:
-                raise RuntimeError('%s failed verification, unsupported hash algorithm: %s' % (md['local_path'], md['checksum']['algorithm']))
+                raise RuntimeError('%s failed verification, unsupported hash algorithm: %s' %
+                                   (md['local_path'], md['checksum']['algorithm']))
 
             hash_obj = hash_constructor()
             with open(md['local_path'], 'rb') as file_handle:
@@ -248,6 +248,8 @@ class MetadataFiles(object):
             file_handle = gzip.open(file_path, 'r')
         elif file_path.endswith('.xz'):
             file_handle = lzma.LZMAFile(file_path, 'r')
+        elif file_path.endswith('.bz2'):
+            file_handle = bz2.BZ2File(file_path, 'r')
         else:
             file_handle = open(file_path, 'r')
         return file_handle
@@ -271,7 +273,8 @@ class MetadataFiles(object):
         access to each unit's data.
         """
         for filename, tag, process_func in (
-            (filelists.METADATA_FILE_NAME, filelists.PACKAGE_TAG, filelists.process_package_element),
+            (filelists.METADATA_FILE_NAME,
+             filelists.PACKAGE_TAG, filelists.process_package_element),
             (other.METADATA_FILE_NAME, other.PACKAGE_TAG, other.process_package_element),
         ):
             xml_file_handle = self.get_metadata_file_handle(filename)
@@ -319,9 +322,9 @@ class MetadataFiles(object):
         based on data obtained in the raw XML snippets.
 
         :param model:   model instance to manipulate
-        :type  model:   pulp_rpm.common.models.RPM
+        :type  model:   pulp_rpm.plugins.db.models.RPM
         """
-        repodata = model.metadata.setdefault('repodata',{})
+        repodata = model.metadata.setdefault('repodata', {})
         db_key = self.generate_db_key(model.unit_key)
         for filename, metadata_key, process_func in (
             (filelists.METADATA_FILE_NAME, 'files', filelists.process_package_element),
@@ -337,9 +340,9 @@ class MetadataFiles(object):
             unit_key, items = process_func(element)
             model.metadata[metadata_key] = items
 
-        repodata['primary'] = model.raw_xml
+        raw_xml = model.raw_xml
+        repodata['primary'] = change_location_tag(raw_xml, model.relative_path)
 
-# utilities --------------------------------------------------------------------
 
 def process_repomd_data_element(data_element):
     """
@@ -370,7 +373,8 @@ def process_repomd_data_element(data_element):
 
     checksum_element = data_element.find(CHECKSUM_TAG)
     if checksum_element is not None:
-        file_info['checksum']['algorithm'] = checksum_element.attrib['type']
+        checksum_type = verification.sanitize_checksum_type(checksum_element.attrib['type'])
+        file_info['checksum']['algorithm'] = checksum_type
         file_info['checksum']['hex_digest'] = checksum_element.text
 
     size_element = data_element.find(SIZE_TAG)
@@ -383,7 +387,8 @@ def process_repomd_data_element(data_element):
 
     open_checksum_element = data_element.find(OPEN_CHECKSUM_TAG)
     if open_checksum_element is not None:
-        file_info['open_checksum']['algorithm'] = open_checksum_element.attrib['type']
+        checksum_type = verification.sanitize_checksum_type(open_checksum_element.attrib['type'])
+        file_info['open_checksum']['algorithm'] = checksum_type
         file_info['open_checksum']['hex_digest'] = open_checksum_element.text
 
     open_size_element = data_element.find(OPEN_SIZE_TAG)

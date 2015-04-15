@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import logging
 import shutil
 
@@ -18,10 +5,11 @@ from nectar.listener import DownloadEventListener, AggregatingEventListener
 from pulp.common.plugins import importer_constants
 from pulp.plugins.util import verification
 
-from pulp_rpm.common import constants, models
+from pulp_rpm.common import constants
+from pulp_rpm.plugins.db import models
 
 
-_LOGGER = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class DistroFileListener(AggregatingEventListener):
@@ -90,7 +78,8 @@ class ContentListener(DownloadEventListener):
         if isinstance(model, (models.RPM, models.SRPM)):
             self.metadata_files.add_repodata(model)
         # init unit, which is idempotent
-        unit = self.sync_conduit.init_unit(model.TYPE, model.unit_key, model.metadata, model.relative_path)
+        unit = self.sync_conduit.init_unit(model.TYPE, model.unit_key, model.metadata,
+                                           model.relative_path)
         # move to final location
         shutil.move(report.destination, unit.storage_path)
         # save unit
@@ -116,7 +105,7 @@ class ContentListener(DownloadEventListener):
         fails, the error is noted in this instance's progress report and the error is re-raised.
 
         :param model: domain model instance of the package that was downloaded
-        :type  model: pulp_rpm.common.models.RPM
+        :type  model: pulp_rpm.plugins.db.models.RPM
         :param report: report handed to this listener by the downloader
         :type  report: nectar.report.DownloadReport
 
@@ -142,11 +131,12 @@ class ContentListener(DownloadEventListener):
 
     def _verify_checksum(self, model, report):
         """
-        Verifies the checksum of the given unit if the sync is configured to do so. If the verification
+        Verifies the checksum of the given unit if the sync is configured to do so. If the
+        verification
         fails, the error is noted in this instance's progress report and the error is re-raised.
 
         :param model: domain model instance of the package that was downloaded
-        :type  model: pulp_rpm.common.models.RPM
+        :type  model: pulp_rpm.plugins.db.models.RPM
         :param report: report handed to this listener by the downloader
         :type  report: nectar.report.DownloadReport
 

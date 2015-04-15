@@ -1,71 +1,43 @@
 #!/usr/bin/env python
-#
-# Copyright (C) 2012 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 import optparse
 import os
-import shutil
 import sys
 
-WARNING_COLOR = '\033[31m'
-WARNING_RESET = '\033[0m'
+from pulp.devel import environment
 
-#
+
 # Str entry assumes same src and dst relative path.
 # Tuple entry is explicit (src, dst)
 #
 # Please keep alphabetized and by subproject
 
 # Standard directories
-DIR_ADMIN_EXTENSIONS = '/usr/lib/pulp/admin/extensions/'
-DIR_CONSUMER_EXTENSIONS = '/usr/lib/pulp/consumer/extensions/'
 DIR_PLUGINS = '/usr/lib/pulp/plugins'
 
+ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+
 DIRS = (
-    '/var/lib/pulp/published',
-    '/var/lib/pulp/published/http',
-    '/var/lib/pulp/published/https',
+    '/var/lib/pulp/published/yum/http',
+    '/var/lib/pulp/published/yum/https',
 )
 
 LINKS = (
     # RPM Support Configuration
-    ('pulp_rpm/etc/httpd/conf.d/pulp_rpm.conf', '/etc/httpd/conf.d/pulp_rpm.conf'),
-    ('pulp_rpm/etc/pulp/repo_auth.conf', '/etc/pulp/repo_auth.conf'),
-    ('pulp_rpm/etc/pulp/agent/conf.d/rpm.conf', '/etc/pulp/agent/conf.d/rpm.conf'),
-    ('pulp_rpm/etc/pulp/agent/conf.d/bind.conf', '/etc/pulp/agent/conf.d/bind.conf'),
-    ('pulp_rpm/etc/pulp/agent/conf.d/linux.conf', '/etc/pulp/agent/conf.d/linux.conf'),
-    ('pulp_rpm/etc/pulp/vhosts80/rpm.conf', '/etc/pulp/vhosts80/rpm.conf'),
-    ('pulp_rpm/etc/yum/pluginconf.d/pulp-profile-update.conf', '/etc/yum/pluginconf.d/pulp-profile-update.conf'),
-
-    # RPM and ISO Support Admin Extensions
-    ('pulp_rpm/extensions/admin/iso', DIR_ADMIN_EXTENSIONS + 'iso'),
-    ('pulp_rpm/extensions/admin/rpm_admin_consumer', DIR_ADMIN_EXTENSIONS + 'rpm_admin_consumer'),
-    ('pulp_rpm/extensions/admin/rpm_repo', DIR_ADMIN_EXTENSIONS + 'rpm_repo'),
-
-    # RPM Support Consumer Extensions
-    ('pulp_rpm/extensions/consumer/rpm_consumer', DIR_CONSUMER_EXTENSIONS + 'rpm_consumer'),
-
-    # RPM Support Agent Handlers
-    ('pulp_rpm/handlers/rpm.py', '/usr/lib/pulp/agent/handlers/rpm.py'),
-    ('pulp_rpm/handlers/bind.py', '/usr/lib/pulp/agent/handlers/bind.py'),
-    ('pulp_rpm/handlers/linux.py', '/usr/lib/pulp/agent/handlers/linux.py'),
+    ('plugins/etc/httpd/conf.d/pulp_rpm.conf', '/etc/httpd/conf.d/pulp_rpm.conf'),
+    ('handlers/etc/pulp/agent/conf.d/rpm.conf', '/etc/pulp/agent/conf.d/rpm.conf'),
+    ('handlers/etc/pulp/agent/conf.d/bind.conf', '/etc/pulp/agent/conf.d/bind.conf'),
+    ('handlers/etc/pulp/agent/conf.d/linux.conf', '/etc/pulp/agent/conf.d/linux.conf'),
+    ('plugins/etc/pulp/vhosts80/rpm.conf', '/etc/pulp/vhosts80/rpm.conf'),
+    ('handlers/etc/yum/pluginconf.d/pulp-profile-update.conf', '/etc/yum/pluginconf.d/pulp-profile-update.conf'),
 
     # RPM Support Plugins
-    ('pulp_rpm/plugins/types/rpm_support.json', DIR_PLUGINS + '/types/rpm_support.json'),
-    ('pulp_rpm/plugins/types/iso_support.json', DIR_PLUGINS + '/types/iso_support.json'),
+    ('plugins/types/rpm_support.json', DIR_PLUGINS + '/types/rpm_support.json'),
+    ('plugins/types/iso_support.json', DIR_PLUGINS + '/types/iso_support.json'),
+    ('plugins/usr/share/pulp-rpm', '/usr/share/pulp-rpm'),
 
     # RPM Support Web Configuration
-    ('pulp_rpm/usr/lib/yum-plugins/pulp-profile-update.py', '/usr/lib/yum-plugins/pulp-profile-update.py'),
-    ('pulp_rpm/srv/pulp/repo_auth.wsgi', '/srv/pulp/repo_auth.wsgi'),
+    ('handlers/usr/lib/yum-plugins/pulp-profile-update.py', '/usr/lib/yum-plugins/pulp-profile-update.py'),
 )
 
 
@@ -100,23 +72,14 @@ def parse_cmdline():
     return (opts, args)
 
 
-def warning(msg):
-    print "%s%s%s" % (WARNING_COLOR, msg, WARNING_RESET)
-
-
-def debug(opts, msg):
-    if not opts.debug:
-        return
-    sys.stderr.write('%s\n' % msg)
-
-
 def create_dirs(opts):
     for d in DIRS:
         if os.path.exists(d) and os.path.isdir(d):
-            debug(opts, 'skipping %s exists' % d)
+            environment.debug(opts, 'skipping %s exists' % d)
             continue
-        debug(opts, 'creating directory: %s' % d)
+        environment.debug(opts, 'creating directory: %s' % d)
         os.makedirs(d, 0777)
+    os.system('chown -R apache:apache /var/lib/pulp/published')
 
 
 def getlinks():
@@ -133,6 +96,9 @@ def getlinks():
 
 
 def install(opts):
+    # Install the packages in developer mode
+    environment.manage_setup_pys('install', ROOT_DIR)
+
     warnings = []
     create_dirs(opts)
     currdir = os.path.abspath(os.path.dirname(__file__))
@@ -141,27 +107,23 @@ def install(opts):
         if warning_msg:
             warnings.append(warning_msg)
 
-    # Link between pulp and apache
-    create_link(opts, '/var/lib/pulp/published', '/var/www/pub')
-
-    # Grant apache write access permissions
-    os.system('chmod 3775 /var/www/pub')
-    os.system('chown -R apache:apache /var/lib/pulp/published')
-
     if warnings:
         print "\n***\nPossible problems:  Please read below\n***"
         for w in warnings:
-            warning(w)
+            environment.warning(w)
     return os.EX_OK
 
 
 def uninstall(opts):
     for src, dst in getlinks():
-        debug(opts, 'removing link: %s' % dst)
+        environment.debug(opts, 'removing link: %s' % dst)
         if not os.path.islink(dst):
-            debug(opts, '%s does not exist, skipping' % dst)
+            environment.debug(opts, '%s does not exist, skipping' % dst)
             continue
         os.unlink(dst)
+
+    # Uninstall the packages
+    environment.manage_setup_pys('uninstall', ROOT_DIR)
 
     return os.EX_OK
 
@@ -174,7 +136,7 @@ def create_link(opts, src, dst):
         return "[%s] is not a symbolic link as we expected, please adjust if this is not what you intended." % (dst)
 
     if not os.path.exists(os.readlink(dst)):
-        warning('BROKEN LINK: [%s] attempting to delete and fix it to point to %s.' % (dst, src))
+        environment.warning('BROKEN LINK: [%s] attempting to delete and fix it to point to %s.' % (dst, src))
         try:
             os.unlink(dst)
             return _create_link(opts, src, dst)
@@ -182,7 +144,7 @@ def create_link(opts, src, dst):
             msg = "[%s] was a broken symlink, failed to delete and relink to [%s], please fix this manually" % (dst, src)
             return msg
 
-    debug(opts, 'verifying link: %s points to %s' % (dst, src))
+    environment.debug(opts, 'verifying link: %s points to %s' % (dst, src))
     dst_stat = os.stat(dst)
     src_stat = os.stat(src)
     if dst_stat.st_ino != src_stat.st_ino:
@@ -191,7 +153,7 @@ def create_link(opts, src, dst):
 
 
 def _create_link(opts, src, dst):
-        debug(opts, 'creating link: %s pointing to %s' % (dst, src))
+        environment.debug(opts, 'creating link: %s pointing to %s' % (dst, src))
         try:
             os.symlink(src, dst)
         except OSError, e:

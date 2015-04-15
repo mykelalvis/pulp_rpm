@@ -1,36 +1,25 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import hashlib
 import logging
 import os
 import shutil
-
-import rpm
+import stat
 from xml.etree import cElementTree as ET
 
+import rpm
 from pulp.plugins.util import verification
 from pulp.server.db.model.criteria import UnitAssociationCriteria
+from pulp.server.exceptions import PulpCodedValidationException, PulpCodedException
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
+from pulp_rpm.plugins import error_codes
 from pulp_rpm.plugins.importers.yum import utils
 from pulp_rpm.plugins.importers.yum.parse import rpm as rpm_parse
 from pulp_rpm.plugins.importers.yum.repomd import primary
 
-
 # this is required because some of the pre-migration XML tags use the "rpm"
 # namespace, which causes a parse error if that namespace isn't declared.
-FAKE_XML = '<?xml version="1.0" encoding="%(encoding)s"?><faketag xmlns:rpm="http://pulpproject.org">%(xml)s</faketag>'
+FAKE_XML = '<?xml version="1.0" encoding="%(encoding)s"?><faketag ' \
+           'xmlns:rpm="http://pulpproject.org">%(xml)s</faketag>'
 
 # Used when extracting metadata from an RPM
 RPMTAG_NOSOURCE = 1051
@@ -47,9 +36,16 @@ _LOGGER = logging.getLogger(__name__)
 # method can consistently format/word the failure report. These should not be
 # raised outside of this module.
 
-class ModelInstantiationError(Exception): pass
-class StoreFileError(Exception): pass
-class PackageMetadataError(Exception) : pass
+class ModelInstantiationError(Exception):
+    pass
+
+
+class StoreFileError(Exception):
+    pass
+
+
+class PackageMetadataError(Exception):
+    pass
 
 
 def upload(repo, type_id, unit_key, metadata, file_path, conduit, config):
@@ -85,12 +81,12 @@ def upload(repo, type_id, unit_key, metadata, file_path, conduit, config):
 
     # Dispatch to process the upload by type
     handlers = {
-        models.RPM.TYPE : _handle_package,
-        models.SRPM.TYPE : _handle_package,
-        models.PackageGroup.TYPE : _handle_group_category,
-        models.PackageCategory.TYPE : _handle_group_category,
-        models.Errata.TYPE : _handle_erratum,
-        models.YumMetadataFile.TYPE : _handle_yum_metadata_file,
+        models.RPM.TYPE: _handle_package,
+        models.SRPM.TYPE: _handle_package,
+        models.PackageGroup.TYPE: _handle_group_category,
+        models.PackageCategory.TYPE: _handle_group_category,
+        models.Errata.TYPE: _handle_erratum,
+        models.YumMetadataFile.TYPE: _handle_yum_metadata_file,
     }
 
     if type_id not in handlers:
@@ -110,6 +106,9 @@ def upload(repo, type_id, unit_key, metadata, file_path, conduit, config):
         msg = 'metadata for the given package could not be extracted'
         _LOGGER.exception(msg)
         return _fail_report(msg)
+    except PulpCodedException, e:
+        _LOGGER.exception(e)
+        return _fail_report(str(e))
     except:
         msg = 'unexpected error occurred importing uploaded file'
         _LOGGER.exception(msg)
@@ -142,10 +141,12 @@ def _handle_erratum(type_id, unit_key, metadata, file_path, conduit, config):
 
     unit = conduit.init_unit(model.TYPE, model.unit_key, model.metadata, None)
 
-    if not config.get_boolean(CONFIG_SKIP_ERRATUM_LINK):
-        _link_errata_to_rpms(conduit, model, unit)
+    # this save must happen before the link is created, because the link logic
+    # requires the unit to have an "id".
+    saved_unit = conduit.save_unit(unit)
 
-    conduit.save_unit(unit)
+    if not config.get_boolean(CONFIG_SKIP_ERRATUM_LINK):
+        _link_errata_to_rpms(conduit, model, saved_unit)
 
 
 def _link_errata_to_rpms(conduit, errata_model, errata_unit):
@@ -155,7 +156,7 @@ def _link_errata_to_rpms(conduit, errata_model, errata_unit):
     :param conduit: provides access to relevant Pulp functionality
     :type  conduit: pulp.plugins.conduits.unit_add.UnitAddConduit
     :param errata_model:    model object representing an errata
-    :type  errata_model:    pulp_rpm.common.models.Errata
+    :type  errata_model:    pulp_rpm.plugins.db.models.Errata
     :param errata_unit:     unit object representing an errata
     :type  errata_unit:     pulp.plugins.model.Unit
     """
@@ -240,13 +241,12 @@ def _handle_package(type_id, unit_key, metadata, file_path, conduit, config):
     :type  conduit: pulp.plugins.conduits.upload.UploadConduit
     :type  config: pulp.plugins.config.PluginCallConfiguration
     """
-
     # Extract the RPM key and metadata
     try:
-        new_unit_key, new_unit_metadata = _generate_rpm_data(file_path, metadata)
+        new_unit_key, new_unit_metadata = _generate_rpm_data(type_id, file_path, metadata)
     except:
         _LOGGER.exception('Error extracting RPM metadata for [%s]' % file_path)
-        raise PackageMetadataError()
+        raise
 
     # Update the RPM-extracted data with anything additional the user specified.
     # Allow the user-specified values to override the extracted ones.
@@ -304,19 +304,21 @@ def _update_provides_requires(unit):
     provides_element = format_element.find('provides')
     requires_element = format_element.find('requires')
     unit.metadata['provides'] = map(primary._process_rpm_entry_element,
-                                     provides_element.findall('entry')) if provides_element else []
+                                    provides_element.findall('entry')) if provides_element else []
     unit.metadata['requires'] = map(primary._process_rpm_entry_element,
-                                     requires_element.findall('entry')) if requires_element else []
+                                    requires_element.findall('entry')) if requires_element else []
 
 
-def _generate_rpm_data(rpm_filename, user_metadata):
+def _generate_rpm_data(type_id, rpm_filename, user_metadata=None):
     """
     For the given RPM, analyzes its metadata to generate the appropriate unit
     key and metadata fields, returning both to the caller.
 
+    :param type_id: The type of the unit that is being generated
+    :type  type_id: str
     :param rpm_filename: full path to the RPM to analyze
     :type  rpm_filename: str
-    :param user_metadata: user supplied metadata about the unit
+    :param user_metadata: user supplied metadata about the unit. This is optional.
     :type  user_metadata: dict
 
     :return: tuple of unit key and unit metadata for the RPM
@@ -324,7 +326,8 @@ def _generate_rpm_data(rpm_filename, user_metadata):
     """
 
     # Expected metadata fields:
-    # "vendor", "description", "buildhost", "license", "vendor", "requires", "provides", "relativepath", "filename"
+    # "vendor", "description", "buildhost", "license", "vendor", "requires", "provides",
+    # "relativepath", "filename"
     #
     # Expected unit key fields:
     # "name", "epoch", "version", "release", "arch", "checksumtype", "checksum"
@@ -346,8 +349,10 @@ def _generate_rpm_data(rpm_filename, user_metadata):
 
     # -- Unit Key -----------------------
     # Checksum
-    if 'checksum-type' in user_metadata:
-        unit_key['checksumtype'] = user_metadata['checksum-type']
+    if user_metadata and user_metadata.get('checksum_type'):
+        user_checksum_type = user_metadata.get('checksum_type')
+        user_checksum_type = verification.sanitize_checksum_type(user_checksum_type)
+        unit_key['checksumtype'] = user_checksum_type
     else:
         unit_key['checksumtype'] = verification.TYPE_SHA256
     unit_key['checksum'] = _calculate_checksum(unit_key['checksumtype'], rpm_filename)
@@ -356,7 +361,7 @@ def _generate_rpm_data(rpm_filename, user_metadata):
     for k in ['name', 'version', 'release', 'epoch']:
         unit_key[k] = headers[k]
 
-    #   Epoch munging
+    # Epoch munging
     if unit_key['epoch'] is None:
         unit_key['epoch'] = str(0)
     else:
@@ -373,8 +378,23 @@ def _generate_rpm_data(rpm_filename, user_metadata):
 
     # -- Unit Metadata ------------------
 
-    metadata['relativepath'] = os.path.basename(rpm_filename)
-    metadata['filename'] = os.path.basename(rpm_filename)
+    # construct filename from metadata (BZ #1101168)
+    if headers[rpm.RPMTAG_SOURCEPACKAGE]:
+        if type_id != models.SRPM.TYPE:
+            raise PulpCodedValidationException(error_code=error_codes.RPM1002)
+        rpm_basefilename = "%s-%s-%s.src.rpm" % (headers['name'],
+                                                 headers['version'],
+                                                 headers['release'])
+    else:
+        if type_id != models.RPM.TYPE:
+            raise PulpCodedValidationException(error_code=error_codes.RPM1003)
+        rpm_basefilename = "%s-%s-%s.%s.rpm" % (headers['name'],
+                                                headers['version'],
+                                                headers['release'],
+                                                headers['arch'])
+
+    metadata['relativepath'] = rpm_basefilename
+    metadata['filename'] = rpm_basefilename
 
     # This format is, and has always been, incorrect. As of the new yum importer, the
     # plugin will generate these from the XML snippet because the API into RPM headers
@@ -388,6 +408,11 @@ def _generate_rpm_data(rpm_filename, user_metadata):
     metadata['license'] = headers['license']
     metadata['vendor'] = headers['vendor']
     metadata['description'] = headers['description']
+    metadata['build_time'] = headers[rpm.RPMTAG_BUILDTIME]
+    # Use the mtime of the file to match what is in the generated xml from
+    # rpm_parse.get_package_xml(..)
+    file_stat = os.stat(rpm_filename)
+    metadata['time'] = file_stat[stat.ST_MTIME]
 
     return unit_key, metadata
 

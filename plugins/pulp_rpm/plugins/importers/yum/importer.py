@@ -1,24 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 from gettext import gettext as _
-import logging
-import os
 
 from pulp.plugins.importer import Importer
 from pulp.common.config import read_json_config
 
-from pulp_rpm.common import ids, models
+from pulp_rpm.common import ids
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum import sync, associate, upload, config_validate
 
 
@@ -28,8 +14,6 @@ from pulp_rpm.plugins.importers.yum import sync, associate, upload, config_valid
 # that's the final solution and the plugin will attempt to load the file itself in the
 # entry_point method.
 CONF_FILENAME = 'server/plugins.conf.d/%s.json' % ids.TYPE_ID_IMPORTER_YUM
-
-_LOGGER = logging.getLogger(__name__)
 
 
 def entry_point():
@@ -83,6 +67,9 @@ class YumImporter(Importer):
         self._current_sync.finalize()
         return report
 
-    def cancel_sync_repo(self, call_request, call_report):
+    def cancel_sync_repo(self):
+        """
+        Cancel a currently running repository synchronization operation.
+        """
         self._current_sync.cancel()
         self._current_sync.finalize()

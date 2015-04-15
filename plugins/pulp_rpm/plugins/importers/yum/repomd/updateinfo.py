@@ -1,18 +1,10 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+
 import logging
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,8 +23,13 @@ def process_package_element(element):
     :return:    dictionary describing an errata
     :rtype:     dict
     """
+    description_element = element.find('description')
+    if description_element is not None:
+        description_text = description_element.text
+    else:
+        description_text = ''
     package_info = {
-        'description': element.find('description').text,
+        'description': description_text,
         'from': element.attrib['from'],
         'id': element.find('id').text,
         'issued': element.find('issued').attrib['date'],
@@ -87,11 +84,16 @@ def _parse_reference(element):
 def _parse_collection(element):
     ret = {
         'packages': map(_parse_package, element.findall('package')),
-        'name': element.find('name').text,
     }
     # based on yum's parsing, this could be optional. See yum.update_md.UpdateNotice._parse_pkglist
     if 'short' in element.attrib:
         ret['short'] = element.attrib['short']
+
+    name = element.find('name')
+    if name is not None:
+        ret['name'] = name.text
+    else:
+        ret['name'] = ""
 
     return ret
 
@@ -109,7 +111,7 @@ def _parse_package(element):
         'epoch': element.attrib.get('epoch', None),
         'version': element.attrib['version'],
         'release': element.attrib['release'],
-        'src': element.attrib.get('src', ''), # apparently this isn't required
+        'src': element.attrib.get('src', ''),  # apparently this isn't required
         'filename': element.find('filename').text,
         'sum': sum_tuple,
     }

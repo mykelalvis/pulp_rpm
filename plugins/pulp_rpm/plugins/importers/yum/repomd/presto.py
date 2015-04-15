@@ -1,19 +1,11 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
-from pulp_rpm.common import models
+from pulp.plugins.util import verification
 
-METADATA_FILE_NAME = 'prestodelta'
+from pulp_rpm.plugins.db import models
+
+# rhel/centos based distributions use 'prestodelta', suse based distributions use 'deltainfo'
+METADATA_FILE_NAMES = ['prestodelta', 'deltainfo']
 
 PACKAGE_TAG = 'newpackage'
 
@@ -26,13 +18,14 @@ def process_package_element(element):
     :type  element: xml.etree.ElementTree.Element
 
     :return:    models.DRPM instance for the XML block
-    :rtype:     pulp_rpm.common.models.DRPM
+    :rtype:     pulp_rpm.plugins.db.models.DRPM
     """
     delta = element.find('delta')
     filename = delta.find('filename')
     sequence = delta.find('sequence')
     size = delta.find('size')
     checksum = delta.find('checksum')
+    checksum_type = verification.sanitize_checksum_type(checksum.attrib['type'])
 
     return models.DRPM.from_package_info({
         'type': 'drpm',
@@ -48,5 +41,5 @@ def process_package_element(element):
         'sequence': sequence.text,
         'size': int(size.text),
         'checksum': checksum.text,
-        'checksumtype': checksum.attrib['type'],
+        'checksumtype': checksum_type,
     })

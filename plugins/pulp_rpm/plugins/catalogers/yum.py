@@ -1,26 +1,13 @@
-# Copyright (c) 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import shutil
-
 from tempfile import mkdtemp
 from urlparse import urljoin
 
-from nectar.config import DownloaderConfig
-
 from pulp.plugins.cataloger import Cataloger
+from pulp.server.content.sources import descriptor
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum.repomd.metadata import MetadataFiles
-from pulp_rpm.plugins.importers.yum.repomd import primary
+from pulp_rpm.plugins.importers.yum.repomd import primary, nectar_factory
 from pulp_rpm.plugins.importers.yum.repomd import packages
 
 
@@ -37,7 +24,6 @@ def entry_point():
 
 
 class YumCataloger(Cataloger):
-
     @classmethod
     def metadata(cls):
         return {
@@ -68,6 +54,21 @@ class YumCataloger(Cataloger):
         finally:
             fp.close()
 
+    def get_downloader(self, conduit, config, url):
+        """
+        Get object suitable for downloading content published
+        in the content catalog by a content source.
+        :param conduit: Access to pulp platform API.
+        :type conduit: pulp.server.plugins.conduits.cataloger.CatalogerConduit
+        :param config: The content source configuration.
+        :type config: dict
+        :param url: The URL for the content source.
+        :type url: str
+        :return: A configured downloader.
+        :rtype: nectar.downloaders.base.Downloader
+        """
+        return nectar_factory.create_downloader(url, self.nectar_config(config))
+
     def refresh(self, conduit, config, url):
         """
         Refresh the content catalog.
@@ -79,12 +80,21 @@ class YumCataloger(Cataloger):
         :type url: str
         """
         dst_dir = mkdtemp()
-        nectar_config = DownloaderConfig(**config)
         try:
-            md_files = MetadataFiles(url, dst_dir, nectar_config)
+            md_files = MetadataFiles(url, dst_dir, self.nectar_config(config))
             md_files.download_repomd()
             md_files.parse_repomd()
             md_files.download_metadata_files()
             self._add_packages(conduit, url, md_files)
         finally:
             shutil.rmtree(dst_dir)
+
+    def nectar_config(self, config):
+        """
+        Get a nectar configuration using the specified content source configuration.
+        :param config: The content source configuration.
+        :type config: dict
+        :return: A nectar downloader configuration
+        :rtype: nectar.config.DownloaderConfig
+        """
+        return descriptor.nectar_config(config)

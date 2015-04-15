@@ -1,15 +1,4 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2011 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 
 import os
 import commands
@@ -17,9 +6,9 @@ import datetime
 import tempfile
 from stat import ST_SIZE
 
-import export_utils
-from pulp_rpm.common import constants
 from pulp_rpm.yum_plugin.util import getLogger
+
+
 log = getLogger(__name__)
 
 # Define the size (in megabytes) of a DVD sized ISO
@@ -38,9 +27,11 @@ def create_iso(target_dir, output_dir, prefix, image_size=DVD_ISO_SIZE, progress
     :type  output_dir:          str
     :param prefix:              prefix for the ISO file names; usually includes a repo id
     :type  prefix:              str
-    :param image_size:          The maximum size of the image in bytes. Defaults to a dvd sized image.
+    :param image_size:          The maximum size of the image in bytes. Defaults to a dvd sized
+    image.
     :type  image_size:          int
-    :param progress_callback:   callback to report progress info to publish_conduit. This is expected to
+    :param progress_callback:   callback to report progress info to publish_conduit. This is
+    expected to
                                 take the following parameters: a string to use as the key in a
                                 dictionary, and the second parameter is assigned to it.
     :type  progress_callback:   function
@@ -58,29 +49,19 @@ def create_iso(target_dir, output_dir, prefix, image_size=DVD_ISO_SIZE, progress
     image_list = _compute_image_files(file_list, image_size)
     image_count = len(image_list)
 
-    # Update the progress report
-    iso_progress_status = export_utils.init_progress_report(image_count)
-    set_progress("isos", iso_progress_status, progress_callback)
-
     for i in range(image_count):
         name = "%s-%s-%02d.iso" % (prefix, start_time.strftime("%Y-%m-%dT%H.%M"), i + 1)
         _make_iso(image_list[i], target_dir, output_dir, name)
 
-        # Update the progress report
-        iso_progress_status[constants.PROGRESS_ITEMS_LEFT_KEY] -= 1
-        iso_progress_status[constants.PROGRESS_NUM_SUCCESS_KEY] += 1
-        set_progress("isos", iso_progress_status, progress_callback)
-
-    iso_progress_status["state"] = constants.STATE_COMPLETE
-    set_progress("isos", iso_progress_status, progress_callback)
-
 
 def _make_iso(file_list, target_dir, output_dir, filename):
     """
-    Helper method to make an ISO image. This method could result in an OSError or IOError if something
+    Helper method to make an ISO image. This method could result in an OSError or IOError if
+    something
     went wrong when generating the pathspec_file.
 
-    :param file_list:   List of files to add to the ISO image. These should be absolute paths to the files
+    :param file_list:   List of files to add to the ISO image. These should be absolute paths to
+    the files
     :type  file_list:   list
     :param target_dir:  The full path to the root directory tree to be wrapped in an ISO
     :type  target_dir:  str
@@ -135,9 +116,11 @@ def _compute_image_files(file_list, max_image_size):
     Compute file lists to be written to each media image by shoving files into an image until
     image_size is exceeded.
 
-    :param file_list:       A list of tuples, where each tuple is (file_path, file_size), usually the
+    :param file_list:       A list of tuples, where each tuple is (file_path, file_size),
+    usually the
                             output of get_dir_file_list_and_size
-    :type  file_list:       [(str, int)]
+    :type  file_list:       [(str, int)]class TestEntryPoint(unittest.TestCase):
+
     :param max_image_size:  The maximum size of image in bytes
     :type  max_image_size:  int
 
@@ -156,7 +139,8 @@ def _compute_image_files(file_list, max_image_size):
         for file_path, file_size in file_list:
             # An edge case, but if the file is too big to fit on a single ISO, we should stop
             if file_size > max_image_size:
-                raise ValueError('The maximum ISO size is not large enough to contain %s' % file_path)
+                raise ValueError(
+                    'The maximum ISO size is not large enough to contain %s' % file_path)
 
             if image_size + file_size > max_image_size:
                 # If adding this file exceeds image size, break out of the for loop
@@ -172,21 +156,6 @@ def _compute_image_files(file_list, max_image_size):
         images.append(image)
 
     return images
-
-
-def set_progress(type_id, progress_status, progress_callback):
-    """
-    This just checks that progress_callback is not None before calling it
-
-    :param type_id:             The type id to use with the progress callback
-    :type  type_id:             str
-    :param progress_status:     The progress status to use with the progress callback
-    :type  progress_status:     dict
-    :param progress_callback:   The progress callback function to use
-    :type  progress_callback:   function
-    """
-    if progress_callback:
-        progress_callback(type_id, progress_status)
 
 
 def _get_grafts(img_file_paths, target_dir):
@@ -205,7 +174,8 @@ def _get_grafts(img_file_paths, target_dir):
 
     will include ../old.lis as /foo/bar/new_name on the ISO.
 
-    :param img_file_paths:  A list of files paths to graft. These are expected to be the full path to
+    :param img_file_paths:  A list of files paths to graft. These are expected to be the full
+    path to
                             each file, and should be somewhere in the target directory
     :type  img_file_paths:  list
     :param target_dir:      The full path to the target directory
@@ -223,8 +193,10 @@ def _get_grafts(img_file_paths, target_dir):
 
 def _get_pathspec_file(file_list, target_dir):
     """
-    This creates a pathspec file with all the grafts and returns the full path to the file. If an error
-    occurs while writing to the temporary file, the temporary file is cleaned up and the exception is
+    This creates a pathspec file with all the grafts and returns the full path to the file. If an
+    error
+    occurs while writing to the temporary file, the temporary file is cleaned up and the
+    exception is
     re-raised. Otherwise, it is the responsibility of the caller to clean up the temporary file.
 
     A pathspec in mkisofs:
@@ -239,7 +211,8 @@ def _get_pathspec_file(file_list, target_dir):
     :param target_dir: The full path to the target directory
     :type  target_dir: str
 
-    :return: The absolute path of the temporary pathspec file. This is the responsibility of the caller
+    :return: The absolute path of the temporary pathspec file. This is the responsibility of the
+    caller
             to clean up.
     :rtype:  str
     """
@@ -270,7 +243,8 @@ def _get_dir_file_list_and_size(target_dir):
     :param target_dir: The full path to the directory to walk
     :type  target_dir: str
 
-    :return: A tuple in the form (list, int) where the list is a list of tuples of (file_path, file_size)
+    :return: A tuple in the form (list, int) where the list is a list of tuples of (file_path,
+    file_size)
             and the int is the total size of the directory
     :rtype:  tuple
     """

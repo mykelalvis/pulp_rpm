@@ -1,15 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
 """
 Tests for pulp_rpm.plugins.distributors.iso_distributor.distributor
 """
@@ -29,6 +17,7 @@ class TestEntryPoint(unittest.TestCase):
     """
     Test the entry_point method. This is really just to get good coverage numbers, but hey.
     """
+
     def test_entry_point(self):
         iso_distributor, config = distributor.entry_point()
         self.assertEqual(iso_distributor, distributor.ISODistributor)
@@ -39,6 +28,7 @@ class TestISODistributor(unittest.TestCase):
     """
     Test the ISODistributor object.
     """
+
     def setUp(self):
         self.iso_distributor = distributor.ISODistributor()
         self.temp_dir = tempfile.mkdtemp()
@@ -87,8 +77,9 @@ class TestISODistributor(unittest.TestCase):
                                      constants.CONFIG_SERVE_HTTPS: "Heyo!"})
         status, error_message = self.iso_distributor.validate_config(None, config, None)
         self.assertFalse(status)
-        self.assertEqual(error_message, 'The configuration parameter <serve_https> may only be set to a '
-                                        'boolean value, but is currently set to <Heyo!>.')
+        self.assertEqual(error_message,
+                         'The configuration parameter <serve_https> may only be set to a '
+                         'boolean value, but is currently set to <Heyo!>.')
 
     def test_get_hosting_locations_http_only(self):
         """
@@ -134,7 +125,10 @@ class TestISODistributor(unittest.TestCase):
         self.assertEquals(os.path.join(constants.ISO_HTTP_DIR, repo.id), locations[0])
         self.assertEquals(os.path.join(constants.ISO_HTTPS_DIR, repo.id), locations[1])
 
-    @patch('pulp_rpm.plugins.distributors.iso_distributor.distributor.publish.remove_repository_protection', autospec=True)
+    @patch(
+        'pulp_rpm.plugins.distributors.iso_distributor.distributor.publish'
+        '.remove_repository_protection',
+        autospec=True)
     def test_distributor_remove_calls_remove_repository_protection(self, mock_publish):
         repo = self._get_default_repo()
         self.iso_distributor.get_hosting_locations = MagicMock()
@@ -142,30 +136,40 @@ class TestISODistributor(unittest.TestCase):
         self.iso_distributor.unpublish_repo(repo, {})
         mock_publish.assert_called_once_with(repo)
 
-    @patch('pulp_rpm.plugins.distributors.iso_distributor.distributor.publish.configure_repository_protection', autospec=True)
-    def test_post_repo_publish_calls_configure_repository_protection_if_https_enabled(self, mock_protection):
+    @patch(
+        'pulp_rpm.plugins.distributors.iso_distributor.distributor.publish'
+        '.configure_repository_protection',
+        autospec=True)
+    def test_post_repo_publish_calls_configure_repository_protection_if_https_enabled(
+            self, mock_protection):
         repo = self._get_default_repo()
         cert = "foo"
         config = get_basic_config(**{constants.CONFIG_SERVE_HTTP: False,
-                                              constants.CONFIG_SERVE_HTTPS: True,
-                                              constants.CONFIG_SSL_AUTH_CA_CERT: cert})
+                                     constants.CONFIG_SERVE_HTTPS: True,
+                                     constants.CONFIG_SSL_AUTH_CA_CERT: cert})
 
         self.iso_distributor.post_repo_publish(repo, config)
         mock_protection.assert_called_once_with(repo, cert)
 
-    @patch('pulp_rpm.plugins.distributors.iso_distributor.distributor.publish.configure_repository_protection', autospec=True)
-    def test_post_repo_publish_ignores_configure_repository_protection_if_cert_missing(self, mock_protection):
+    @patch(
+        'pulp_rpm.plugins.distributors.iso_distributor.distributor.publish'
+        '.configure_repository_protection',
+        autospec=True)
+    def test_post_repo_publish_ignores_configure_repository_protection_if_cert_missing(
+            self, mock_protection):
         repo = self._get_default_repo()
-        cert = "foo"
         config = get_basic_config(**{constants.CONFIG_SERVE_HTTP: False,
-                                              constants.CONFIG_SERVE_HTTPS: True})
+                                     constants.CONFIG_SERVE_HTTPS: True})
         self.iso_distributor.post_repo_publish(repo, config)
         self.assertFalse(mock_protection.called)
 
-    @patch('pulp_rpm.plugins.distributors.iso_distributor.distributor.publish.configure_repository_protection', autospec=True)
-    def test_post_repo_publish_does_not_call_configure_repository_protection_if_https_disabled(self, mock_protection):
+    @patch(
+        'pulp_rpm.plugins.distributors.iso_distributor.distributor.publish'
+        '.configure_repository_protection',
+        autospec=True)
+    def test_post_repo_publish_does_not_call_configure_repository_protection_if_https_disabled(
+            self, mock_protection):
         repo = self._get_default_repo()
-        cert = "foo"
         config = get_basic_config(**{constants.CONFIG_SERVE_HTTPS: False})
         self.iso_distributor.post_repo_publish(repo, config)
         self.assertFalse(mock_protection.called)

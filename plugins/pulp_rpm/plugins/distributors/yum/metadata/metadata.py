@@ -1,16 +1,4 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software;
-# if not, see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
+import hashlib
 import gzip
 import os
 import traceback
@@ -18,27 +6,35 @@ from gettext import gettext as _
 
 from pulp_rpm.yum_plugin import util
 
-
 _LOG = util.getLogger(__name__)
 
+HASHLIB_ALGORITHMS = ('md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512')
 REPO_DATA_DIR_NAME = 'repodata'
+REPOMD_FILE_NAME = 'repomd.xml'
 
-
-# -- base metadata file context class ------------------------------------------
 
 class MetadataFileContext(object):
     """
     Context manager class for metadata file generation.
     """
 
-    def __init__(self, metadata_file_path):
+    def __init__(self, metadata_file_path, checksum_type=None):
         """
         :param metadata_file_path: full path to metadata file to be generated
         :type  metadata_file_path: str
+        :param checksum_type: checksum type to be used to generate and prepend checksum
+                              to the file names of repodata files. If checksum_type is None,
+                              no checksum is added to the filename
+        :type checksum_type: str or None
         """
 
         self.metadata_file_path = metadata_file_path
         self.metadata_file_handle = None
+        self.checksum_type = checksum_type
+        self.checksum = None
+        if self.checksum_type is not None:
+            assert checksum_type in HASHLIB_ALGORITHMS
+            self.checksum_constructor = getattr(hashlib, checksum_type)
 
     # -- for use with 'with' ---------------------------------------------------
 
@@ -51,7 +47,6 @@ class MetadataFileContext(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
 
         if None not in (exc_type, exc_val, exc_tb):
-
             err_msg = '\n'.join(traceback.format_exception(exc_type, exc_val, exc_tb))
             log_msg = _('Exception occurred while writing [%(m)s]\n%(e)s')
             # any errors here should have already been caught and logged
@@ -80,7 +75,7 @@ class MetadataFileContext(object):
         """
         Write the closing root level tag into the metadata file and close it.
         """
-        if self.metadata_file_handle is None:
+        if self._is_closed(self.metadata_file_handle):
             # finalize has already been run or initialize has not been run
             return
 
@@ -95,6 +90,20 @@ class MetadataFileContext(object):
 
         except Exception, e:
             _LOG.exception(e)
+
+        # Add calculated checksum to the repodata filename except for repomd file.
+        file_name = os.path.basename(self.metadata_file_path)
+        if self.checksum_type is not None and file_name != REPOMD_FILE_NAME:
+            with open(self.metadata_file_path, 'rb') as file_handle:
+                content = file_handle.read()
+                checksum = self.checksum_constructor(content).hexdigest()
+
+            self.checksum = checksum
+            file_name_with_checksum = checksum + '-' + file_name
+            new_file_path = os.path.join(os.path.dirname(self.metadata_file_path),
+                                         file_name_with_checksum)
+            os.rename(self.metadata_file_path, new_file_path)
+            self.metadata_file_path = new_file_path
 
     # -- metadata file lifecycle -----------------------------------------------
 
@@ -163,11 +172,35 @@ class MetadataFileContext(object):
         """
         Flush any cached writes to the metadata file handle and close it.
         """
-        assert self.metadata_file_handle is not None
-        _LOG.debug('Closing metadata file: %s' % self.metadata_file_path)
+        if not self._is_closed(self.metadata_file_handle):
+            _LOG.debug('Closing metadata file: %s' % self.metadata_file_path)
+            self.metadata_file_handle.flush()
+            self.metadata_file_handle.close()
 
-        self.metadata_file_handle.flush()
-        self.metadata_file_handle.close()
+    @staticmethod
+    def _is_closed(file_object):
+        """
+        Determine if the file object has been closed. If it is None, it is assumed to be closed.
+
+        :param file_object: a file object
+        :type  file_object: file
+
+        :return:    True if the file object is closed or is None, otherwise False
+        :rtype:     bool
+        """
+        if file_object is None:
+            # finalize has already been run or initialize has not been run
+            return True
+
+        try:
+            return file_object.closed
+        except AttributeError:
+            # python 2.6 doesn't have a "closed" attribute on a GzipFile,
+            # so we must look deeper.
+            if isinstance(file_object, gzip.GzipFile):
+                return file_object.myfileobj is None or file_object.myfileobj.closed
+            else:
+                raise
 
 
 # -- pre-generated metadata context --------------------------------------------
@@ -192,7 +225,6 @@ class PreGeneratedMetadataContext(MetadataFileContext):
                    (metadata_category, unit.unit_key.get('name', 'unknown')))
 
         if 'repodata' not in unit.metadata or metadata_category not in unit.metadata['repodata']:
-
             msg = _('No pre-generated metadata found for unit [%(u)s], [%(c)s]')
             _LOG.error(msg % {'u': str(unit.unit_key), 'c': metadata_category})
 
@@ -201,9 +233,9 @@ class PreGeneratedMetadataContext(MetadataFileContext):
         metadata = unit.metadata['repodata'][metadata_category]
 
         if not isinstance(metadata, basestring):
-
             msg = _('%(c)s metadata for [%(u)s] must be a string, but is a %(t)s')
-            _LOG.error(msg % {'c': metadata_category.title(), 'u': unit.id, 't': str(type(metadata))})
+            _LOG.error(
+                msg % {'c': metadata_category.title(), 'u': unit.id, 't': str(type(metadata))})
 
             return
 
@@ -220,4 +252,3 @@ class PreGeneratedMetadataContext(MetadataFileContext):
         :type  unit: pulp.plugins.model.Unit
         """
         raise NotImplementedError()
-

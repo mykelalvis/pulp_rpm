@@ -1,22 +1,10 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import logging
 import os
 
 from createrepo import yumbased
 import rpmUtils
 from pulp.plugins.util import verification
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,9 +38,9 @@ def get_package_xml(pkg_path, sumtype=verification.TYPE_SHA256):
     po._cachedir = None
     primary_xml_snippet = change_location_tag(po.xml_dump_primary_metadata(), pkg_path)
     metadata = {
-        'primary' : primary_xml_snippet,
+        'primary': primary_xml_snippet,
         'filelists': po.xml_dump_filelists_metadata(),
-        'other'   : po.xml_dump_other_metadata(),
+        'other': po.xml_dump_other_metadata(),
     }
     return metadata
 
@@ -71,7 +59,7 @@ def change_location_tag(primary_xml_snippet, relpath):
 
     basename = os.path.basename(relpath)
     start_index = primary_xml_snippet.find("<location ")
-    end_index = primary_xml_snippet.find("/>", start_index) + 2 # adjust to end of closing tag
+    end_index = primary_xml_snippet.find("/>", start_index) + 2  # adjust to end of closing tag
 
     first_portion = string_to_unicode(primary_xml_snippet[:start_index])
     end_portion = string_to_unicode(primary_xml_snippet[end_index:])

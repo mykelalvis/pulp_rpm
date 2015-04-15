@@ -226,7 +226,7 @@ Metadata
  Flag indicating if this erratum is installed it will require a reboot of the system
 
 Distribution
--------------
+------------
 
 The distribution type's ID is ``distribution``.
 
@@ -249,10 +249,13 @@ Unit Key
  Arch of the distribution tree. For example: x86_64
 
 Metadata
-^^^^^^^^^
+^^^^^^^^
 
 ``files``
  Files associated with the distribution tree.
+
+``timestamp``
+ The ``timestamp`` value as taken from the treeinfo file.
 
 Package Group
 -------------
@@ -329,7 +332,7 @@ Metadata
 
 
 Package Group Environment
-----------------------
+-------------------------
 
 The Package Group Environment's ID is ``package_environment``.
 
@@ -371,6 +374,29 @@ Metadata
  Package group IDs and whether they are default options.  The default flag must be set to either
  `True` or `False`.
  Example format: ``{"group" : <group_id>, "default" : True}``
+
+
+Yum Repo Metadata File
+----------------------
+
+The Yum Repo Metadata File's ID is ``yum_repo_metadata_file``.
+
+Unit Key
+^^^^^^^^
+``repo_id``
+ The repository id that this metadata file belongs to
+
+``data_type``
+ The type of the metadata file
+
+Metadata
+^^^^^^^^
+``checksum``
+ The checksum of the metadata file
+
+``checksum_type``
+ The name of the algorithm used to calculate the ``checksum``
+
 
 Yum Importer
 ============
@@ -422,12 +448,13 @@ configuration values are optional.
  Password to use for proxy server authentication.
 
 ``max_speed``
- Limit the Max speed in KB/sec per thread during package downloads; defaults to None
+ The maximum download speed in bytes/sec for a task (such as a sync);
+ defaults to None
 
 ``validate``
  If True, as the repository is synchronized the checksum of each file will be
  verified against the metadata's expectation. Valid values to this option are
- ``True`` and ``False``; defaults to ``True``.
+ ``True`` and ``False``; defaults to ``False``.
 
 ``max_downloads``
  Number of threads used when synchronizing the repository. This count controls
@@ -523,9 +550,10 @@ Optional Configuration Parameters
  to consumers to use in verifying content in the repository. The value to this
  option must be the full path to the GPG key file.
 
-``use_createrepo``
- This is mostly a debug flag to override default snippet-based metadata generation.
- ``False`` will not run and uses existing metadata from sync.
+``generate_sqlite``
+ Boolean flag to indicate whether or not sqlite files should be generated during
+ a repository publish.  If unspecified it will not run due to the extra time needed to
+ perform this operation.
 
 ``checksum_type``
  Checksum type to use for metadata generation

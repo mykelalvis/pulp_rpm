@@ -1,28 +1,17 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 
 import mock
 from pulp.plugins.config import PluginCallConfiguration
-from pulp.plugins.model import SyncReport, Unit
+from pulp.plugins.model import Unit
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
 from pulp_rpm.plugins.importers.yum.repomd import packages, updateinfo
 from pulp_rpm.plugins.importers.yum import upload
+
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), '../../../../data')
 
@@ -194,17 +183,19 @@ class UploadDispatchTests(unittest.TestCase):
 
 
 class UploadErratumTests(unittest.TestCase):
-
     @mock.patch('pulp_rpm.plugins.importers.yum.upload._link_errata_to_rpms')
     def test_handle_erratum_with_link(self, mock_link):
         # Setup
-        unit_key = {'id' : 'test-erratum'}
-        metadata = {'a' : 'a'}
+        unit_key = {'id': 'test-erratum'}
+        metadata = {'a': 'a'}
         config = PluginCallConfiguration({}, {})
 
         mock_conduit = mock.MagicMock()
         inited_unit = Unit(models.Errata.TYPE, unit_key, metadata, None)
+        saved_unit = Unit(models.Errata.TYPE, unit_key, metadata, None)
+        saved_unit.id = 'ihaveanidnow'
         mock_conduit.init_unit.return_value = inited_unit
+        mock_conduit.save_unit.return_value = saved_unit
 
         # Test
         upload._handle_erratum(models.Errata.TYPE, unit_key, metadata, None,
@@ -213,22 +204,22 @@ class UploadErratumTests(unittest.TestCase):
         # Verify
         mock_conduit.init_unit.assert_called_once_with(models.Errata.TYPE, unit_key,
                                                        metadata, None)
-        mock_conduit.save_unit.assert_called_once()
-        saved_unit = mock_conduit.save_unit.call_args[0][0]
-        self.assertEqual(inited_unit, saved_unit)
+        mock_conduit.save_unit.assert_called_once_with(inited_unit)
 
         mock_link.assert_called_once()
         self.assertEqual(mock_link.call_args[0][0], mock_conduit)
         self.assertTrue(isinstance(mock_link.call_args[0][1], models.Errata))
-        self.assertEqual(mock_link.call_args[0][2], saved_unit)
+        # it is very important that this is the saved_unit, and not the inited_unit,
+        # because the underlying link logic requires it to have an "id".
+        self.assertTrue(mock_link.call_args[0][2] is saved_unit)
 
     @mock.patch('pulp_rpm.plugins.importers.yum.upload._link_errata_to_rpms')
     def test_handle_erratum_no_link(self, mock_link):
         # Setup
-        unit_key = {'id' : 'test-erratum'}
-        metadata = {'a' : 'a'}
+        unit_key = {'id': 'test-erratum'}
+        metadata = {'a': 'a'}
         config = PluginCallConfiguration({}, {},
-            override_config={upload.CONFIG_SKIP_ERRATUM_LINK : True})
+                                         override_config={upload.CONFIG_SKIP_ERRATUM_LINK: True})
         mock_conduit = mock.MagicMock()
 
         # Test
@@ -240,7 +231,7 @@ class UploadErratumTests(unittest.TestCase):
 
     def test_handle_erratum_model_error(self):
         # Setup
-        unit_key = {'foo' : 'bar'}
+        unit_key = {'foo': 'bar'}
 
         # Test
         self.assertRaises(upload.ModelInstantiationError, upload._handle_erratum,
@@ -258,18 +249,17 @@ class UploadErratumTests(unittest.TestCase):
                                                      updateinfo.process_package_element)
             errata = list(errata)[0]
 
-        errata_unit = Unit(models.Errata.TYPE, errata.unit_key, errata.clean_metadata, None)
+        errata_unit = Unit(models.Errata.TYPE, errata.unit_key, errata.metadata, None)
 
         # Test
         upload._link_errata_to_rpms(mock_conduit, errata, errata_unit)
 
         # Verify
-        self.assertEqual(2, mock_conduit.get_units.call_count) # once each for RPM and SRPM
-        self.assertEqual(4, mock_conduit.link_unit.call_count) # twice each for RPM and SRPM
+        self.assertEqual(2, mock_conduit.get_units.call_count)  # once each for RPM and SRPM
+        self.assertEqual(4, mock_conduit.link_unit.call_count)  # twice each for RPM and SRPM
 
 
 class UploadYumRepoMetadataFileTests(unittest.TestCase):
-
     def setUp(self):
         super(UploadYumRepoMetadataFileTests, self).setUp()
 
@@ -287,9 +277,9 @@ class UploadYumRepoMetadataFileTests(unittest.TestCase):
 
     def test_handle_yum_metadata_file(self):
         # Setup
-        unit_key = {'data_type' : 'product-id', 'repo_id' : 'test-repo'}
-        metadata = {'local_path' : 'repodata/productid', 'checksum' : 'abcdef',
-                    'checksumtype' : 'sha256'}
+        unit_key = {'data_type': 'product-id', 'repo_id': 'test-repo'}
+        metadata = {'local_path': 'repodata/productid', 'checksum': 'abcdef',
+                    'checksumtype': 'sha256'}
         config = PluginCallConfiguration({}, {})
 
         mock_conduit = mock.MagicMock()
@@ -303,7 +293,7 @@ class UploadYumRepoMetadataFileTests(unittest.TestCase):
 
         # Verify
 
-        #   File was moved correctly
+        # File was moved correctly
         self.assertTrue(not os.path.exists(self.upload_source_filename))
         self.assertTrue(os.path.exists(self.upload_dest_filename))
 
@@ -317,7 +307,7 @@ class UploadYumRepoMetadataFileTests(unittest.TestCase):
 
     def test_handle_yum_metadata_file_model_error(self):
         # Setup
-        unit_key = {'foo' : 'bar'}
+        unit_key = {'foo': 'bar'}
 
         # Test
         self.assertRaises(upload.ModelInstantiationError, upload._handle_yum_metadata_file,
@@ -325,8 +315,8 @@ class UploadYumRepoMetadataFileTests(unittest.TestCase):
 
     def test_handle_yum_metadata_file_storage_error(self):
         # Setup
-        unit_key = {'data_type' : 'product-id', 'repo_id' : 'test-repo'}
-        metadata = {'local_path' : 'repodata/productid'}
+        unit_key = {'data_type': 'product-id', 'repo_id': 'test-repo'}
+        metadata = {'local_path': 'repodata/productid'}
         config = PluginCallConfiguration({}, {})
 
         mock_conduit = mock.MagicMock()
@@ -344,10 +334,9 @@ class UploadYumRepoMetadataFileTests(unittest.TestCase):
 
 
 class GroupCategoryTests(unittest.TestCase):
-
     def test_handle_for_group(self):
         # Setup
-        unit_key = {'id' : 'test-group', 'repo_id' : 'test-repo'}
+        unit_key = {'id': 'test-group', 'repo_id': 'test-repo'}
         metadata = {}
         config = PluginCallConfiguration({}, {})
 
@@ -368,7 +357,7 @@ class GroupCategoryTests(unittest.TestCase):
 
     def test_handle_for_category(self):
         # Setup
-        unit_key = {'id' : 'test-category', 'repo_id' : 'test-repo'}
+        unit_key = {'id': 'test-category', 'repo_id': 'test-repo'}
         metadata = {}
         config = PluginCallConfiguration({}, {})
 
@@ -389,7 +378,7 @@ class GroupCategoryTests(unittest.TestCase):
 
     def test_model_error(self):
         # Setup
-        unit_key = {'foo' : 'bar'}
+        unit_key = {'foo': 'bar'}
 
         # Test
         self.assertRaises(upload.ModelInstantiationError, upload._handle_group_category,
@@ -397,7 +386,6 @@ class GroupCategoryTests(unittest.TestCase):
 
 
 class UploadPackageTests(unittest.TestCase):
-
     def setUp(self):
         super(UploadPackageTests, self).setUp()
 
@@ -423,21 +411,21 @@ class UploadPackageTests(unittest.TestCase):
     def test_handle_package(self, mock_generate):
         # Setup
         unit_key = {
-            'name' : 'walrus',
-            'epoch' : '1',
-            'version' : '5.21',
-            'release' : '1',
-            'arch' : 'noarch',
-            'checksumtype' : 'sha256',
-            'checksum' : 'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2',
+            'name': 'walrus',
+            'epoch': '1',
+            'version': '5.21',
+            'release': '1',
+            'arch': 'noarch',
+            'checksumtype': 'sha256',
+            'checksum': 'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2',
         }
         metadata = {
-            'relativepath': ''
+            'filename': ''
         }
         mock_generate.return_value = unit_key, metadata
 
-        user_unit_key = {'version' : '100'}
-        user_metadata = {'extra-meta' : 'e'}
+        user_unit_key = {'version': '100'}
+        user_metadata = {'extra-meta': 'e'}
         config = PluginCallConfiguration({}, {})
 
         mock_conduit = mock.MagicMock()
@@ -445,17 +433,20 @@ class UploadPackageTests(unittest.TestCase):
         mock_conduit.init_unit.return_value = inited_unit
 
         # Test
-        upload._handle_package(models.RPM.TYPE, user_unit_key, user_metadata, self.upload_src_filename,
+        upload._handle_package(models.RPM.TYPE, user_unit_key, user_metadata,
+                               self.upload_src_filename,
                                mock_conduit, config)
 
         # Verify
 
-        #   File was moved as part of the import
+        # File was moved as part of the import
         self.assertTrue(os.path.exists(self.upload_dest_filename))
         self.assertTrue(not os.path.exists(self.upload_src_filename))
 
         #   Mock calls
-        mock_generate.assert_called_once_with(self.upload_src_filename, user_metadata)
+        mock_generate.assert_called_once_with(models.RPM.TYPE,
+                                              self.upload_src_filename,
+                                              user_metadata)
 
         full_unit_key = dict(unit_key)
         full_metadata = dict(metadata)
@@ -473,10 +464,12 @@ class UploadPackageTests(unittest.TestCase):
     @mock.patch('pulp_rpm.plugins.importers.yum.upload._generate_rpm_data')
     def test_handle_metadata_error(self, mock_generate):
         # Setup
-        mock_generate.side_effect = Exception()
+        class FooException(Exception):
+            pass
+        mock_generate.side_effect = FooException()
 
-        # Test
-        self.assertRaises(upload.PackageMetadataError, upload._handle_package, None, None,
+        # Test - Ensure we haven't blindly masked an exception
+        self.assertRaises(FooException, upload._handle_package, None, None,
                           None, None, None, None)
 
     @mock.patch('pulp_rpm.plugins.importers.yum.upload._generate_rpm_data')
@@ -492,16 +485,16 @@ class UploadPackageTests(unittest.TestCase):
     def test_handle_storage_error(self, mock_generate):
         # Setup
         unit_key = {
-            'name' : 'walrus',
-            'epoch' : '1',
-            'version' : '5.21',
-            'release' : '1',
-            'arch' : 'noarch',
-            'checksumtype' : 'sha256',
-            'checksum' : 'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2',
+            'name': 'walrus',
+            'epoch': '1',
+            'version': '5.21',
+            'release': '1',
+            'arch': 'noarch',
+            'checksumtype': 'sha256',
+            'checksum': 'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2',
         }
         metadata = {
-            'relativepath' : ''
+            'filename': ''
         }
         mock_generate.return_value = unit_key, metadata
         config = PluginCallConfiguration({}, {})
@@ -515,7 +508,8 @@ class UploadPackageTests(unittest.TestCase):
 
     def test_generate_rpm_data(self):
         # Test
-        unit_key, metadata = upload._generate_rpm_data(self.upload_src_filename, {})
+        unit_key, metadata = upload._generate_rpm_data(models.RPM.TYPE,
+                                                       self.upload_src_filename, {})
 
         # Verify
         self.assertEqual(unit_key['name'], 'walrus')
@@ -523,7 +517,56 @@ class UploadPackageTests(unittest.TestCase):
         self.assertEqual(unit_key['version'], '5.21')
         self.assertEqual(unit_key['release'], '1')
         self.assertEqual(unit_key['arch'], 'noarch')
-        self.assertEqual(unit_key['checksum'], 'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2')
+        self.assertEqual(unit_key['checksum'],
+                         'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2')
+        self.assertEqual(unit_key['checksumtype'], 'sha256')
+
+        self.assertEqual(metadata['buildhost'], 'smqe-ws15')
+        self.assertEqual(metadata['description'], 'A dummy package of walrus')
+        self.assertEqual(metadata['filename'], 'walrus-5.21-1.noarch.rpm')
+        self.assertEqual(metadata['license'], 'GPLv2')
+        self.assertEqual(metadata['relativepath'], 'walrus-5.21-1.noarch.rpm')
+        self.assertEqual(metadata['vendor'], None)
+        time_val = os.stat(self.upload_src_filename)[stat.ST_MTIME]
+        self.assertEqual(metadata['build_time'], 1331831368)
+        self.assertEqual(metadata['time'], time_val)
+
+    def test_generate_rpm_data_user_checksum(self):
+        # Test
+        unit_key, metadata = upload._generate_rpm_data(models.RPM.TYPE,
+                                                       self.upload_src_filename,
+                                                       {'checksum_type': 'sha1'})
+
+        # Verify
+        self.assertEqual(unit_key['name'], 'walrus')
+        self.assertEqual(unit_key['epoch'], '0')
+        self.assertEqual(unit_key['version'], '5.21')
+        self.assertEqual(unit_key['release'], '1')
+        self.assertEqual(unit_key['arch'], 'noarch')
+        self.assertEqual(unit_key['checksum'], '8dea2b64fc52062d79d5f96ba6415bffae4d2153')
+        self.assertEqual(unit_key['checksumtype'], 'sha1')
+
+        self.assertEqual(metadata['buildhost'], 'smqe-ws15')
+        self.assertEqual(metadata['description'], 'A dummy package of walrus')
+        self.assertEqual(metadata['filename'], 'walrus-5.21-1.noarch.rpm')
+        self.assertEqual(metadata['license'], 'GPLv2')
+        self.assertEqual(metadata['relativepath'], 'walrus-5.21-1.noarch.rpm')
+        self.assertEqual(metadata['vendor'], None)
+
+    def test_generate_rpm_data_user_checksum_null(self):
+        # Test
+        unit_key, metadata = upload._generate_rpm_data(models.RPM.TYPE,
+                                                       self.upload_src_filename,
+                                                       {'checksum_type': None})
+
+        # Verify
+        self.assertEqual(unit_key['name'], 'walrus')
+        self.assertEqual(unit_key['epoch'], '0')
+        self.assertEqual(unit_key['version'], '5.21')
+        self.assertEqual(unit_key['release'], '1')
+        self.assertEqual(unit_key['arch'], 'noarch')
+        self.assertEqual(unit_key['checksum'],
+                         'e837a635cc99f967a70f34b268baa52e0f412c1502e08e924ff5b09f1f9573f2')
         self.assertEqual(unit_key['checksumtype'], 'sha256')
 
         self.assertEqual(metadata['buildhost'], 'smqe-ws15')
@@ -533,18 +576,21 @@ class UploadPackageTests(unittest.TestCase):
         self.assertEqual(metadata['relativepath'], 'walrus-5.21-1.noarch.rpm')
         self.assertEqual(metadata['vendor'], None)
 
-    def test_generate_rpm_data_user_checksum(self):
-        # Test
-        unit_key, metadata = upload._generate_rpm_data(self.upload_src_filename,
-                                                       {'checksum-type': 'sha1'})
+    def test__generate_rpm_data_sanitizes_checksum_type(self):
+        """
+        Assert that _generate_rpm_data() sanitizes the checksum type.
+        """
+        unit_key, metadata = upload._generate_rpm_data(models.RPM.TYPE,
+                                                       self.upload_src_filename,
+                                                       {'checksum_type': 'sha'})
 
-        # Verify
         self.assertEqual(unit_key['name'], 'walrus')
         self.assertEqual(unit_key['epoch'], '0')
         self.assertEqual(unit_key['version'], '5.21')
         self.assertEqual(unit_key['release'], '1')
         self.assertEqual(unit_key['arch'], 'noarch')
         self.assertEqual(unit_key['checksum'], '8dea2b64fc52062d79d5f96ba6415bffae4d2153')
+        # The checksumtype is sha1, even though it was set to sha because it was sanitized.
         self.assertEqual(unit_key['checksumtype'], 'sha1')
 
         self.assertEqual(metadata['buildhost'], 'smqe-ws15')

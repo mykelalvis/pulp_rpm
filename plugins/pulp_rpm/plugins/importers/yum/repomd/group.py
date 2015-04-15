@@ -1,19 +1,9 @@
 # -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public License as
-# published by the Free Software Foundation; either version 2 of the License
-# (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied, including the
-# implied warranties of MERCHANTABILITY, NON-INFRINGEMENT, or FITNESS FOR A
-# PARTICULAR PURPOSE.
-# You should have received a copy of GPLv2 along with this software; if not,
-# see http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
 import logging
 
-from pulp_rpm.common import models
+from pulp_rpm.plugins.db import models
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,19 +24,20 @@ def process_group_element(repo_id, element):
     :type  element: xml.etree.ElementTree.Element
 
     :return:    models.PackageGroup instance for the XML block
-    :rtype:     pulp_rpm.common.models.PackageGroup
+    :rtype:     pulp_rpm.plugins.db.models.PackageGroup
     """
     packagelist = element.find('packagelist')
-    conditional, default, mandatory, optional = _parse_packagelist(packagelist.findall('packagereq'))
+    conditional, default, mandatory, optional = _parse_packagelist(
+        packagelist.findall('packagereq'))
     langonly = element.find('langonly') or element.find('lang_only')
     name, translated_name = _parse_translated(element.findall('name'))
     description, translated_description = _parse_translated(element.findall('description'))
     display_order = element.find('display_order')
     # yum.comps.Group.parse suggests that this should default to False
-    group_default = _parse_bool(element.find('default').text)\
+    group_default = _parse_bool(element.find('default').text) \
         if element.find('default') is not None else False
     # yum.comps.Group.__init__ suggests that this should default to True
-    user_visible = _parse_bool(element.find('uservisible').text)\
+    user_visible = _parse_bool(element.find('uservisible').text) \
         if element.find('uservisible') is not None else True
 
     return models.PackageGroup.from_package_info({
@@ -78,7 +69,7 @@ def process_category_element(repo_id, element):
     :type  element: xml.etree.ElementTree.Element
 
     :return:    models.PackageCategory instance for the XML block
-    :rtype:     pulp_rpm.common.models.PackageCategory
+    :rtype:     pulp_rpm.plugins.db.models.PackageCategory
     """
     description, translated_description = _parse_translated(element.findall('description'))
     name, translated_name = _parse_translated(element.findall('name'))
@@ -108,7 +99,7 @@ def process_environment_element(repo_id, element):
     :type  element: xml.etree.ElementTree.Element
 
     :return:    models.PackageEnvironment instance for the XML block
-    :rtype:     pulp_rpm.common.models.PackageEnvironment
+    :rtype:     pulp_rpm.plugins.db.models.PackageEnvironment
     """
     description, translated_description = _parse_translated(element.findall('description'))
     name, translated_name = _parse_translated(element.findall('name'))
@@ -116,9 +107,12 @@ def process_environment_element(repo_id, element):
     groups = element.find('grouplist').findall('groupid')
 
     options = []
-    for group in element.find('optionlist').findall('groupid'):
-        default = group.attrib.get('default', False)
-        options.append({'group': group.text, 'default': default})
+    # The optionlist tag is not always present
+    option_list = element.find('optionlist')
+    if option_list is not None:
+        for group in option_list.findall('groupid'):
+            default = group.attrib.get('default', False)
+            options.append({'group': group.text, 'default': default})
 
     return models.PackageEnvironment.from_package_info({
         'description': description,

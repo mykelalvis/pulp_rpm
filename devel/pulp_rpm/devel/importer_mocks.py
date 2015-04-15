@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright © 2013 Red Hat, Inc.
-#
-# This software is licensed to you under the GNU General Public
-# License as published by the Free Software Foundation; either version
-# 2 of the License (GPLv2) or (at your option) any later version.
-# There is NO WARRANTY for this software, express or implied,
-# including the implied warranties of MERCHANTABILITY,
-# NON-INFRINGEMENT, or FITNESS FOR A PARTICULAR PURPOSE. You should
-# have received a copy of GPLv2 along with this software; if not, see
-# http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
-
 import os
 
 from pulp.plugins.conduits.repo_sync import RepoSyncConduit
@@ -22,7 +9,27 @@ from pulp.plugins.model import SyncReport, Unit
 import mock
 
 
-def get_sync_conduit(type_id=None, existing_units=None, pkg_dir=None):
+def get_sync_conduit(existing_units=None, pkg_dir=None, pulp_units=None):
+    """
+    This creates a mock pulp.plugins.conduits.repo_sync.RepoSyncConduit for testing.
+
+    :param existing_units:  A list of Units in the repository this conduit corresponds to.
+                            This should be a subset of existing_units, but if it's not
+                            the search_all_units will combine the two.
+    :type  existing_units:  list
+    :param pkg_dir:         The base directory for packages to use
+    :type  pkg_dir:         str
+    :param pulp_units:      A list of existing Units in Pulp.
+    :type  pulp_units:      list or None
+
+    :return: A mock sync conduit
+    :rtype:  Mock
+    """
+    if existing_units is None:
+        existing_units = []
+    if pulp_units is None:
+        pulp_units = []
+
     def build_failure_report(summary, details):
         return SyncReport(False, sync_conduit._added_count, sync_conduit._updated_count,
                           sync_conduit._removed_count, summary, details)
@@ -52,11 +59,16 @@ def get_sync_conduit(type_id=None, existing_units=None, pkg_dir=None):
 
     def search_all_units(type_id, criteria):
         ret_val = []
-        if existing_units:
-            for u in existing_units:
+        units = set(list(pulp_units) + list(existing_units))
+        if units:
+            for u in units:
                 if u.type_id == type_id:
-                    if u.unit_key['id'] == criteria['filters']['id']:
+                    if criteria['filters'] is None:
                         ret_val.append(u)
+                    else:
+                        for key, value in criteria['filter'].items():
+                            if key in u.unit_key and u.unit_key[key] == value:
+                                ret_val.append(u)
         return ret_val
 
     sync_conduit = mock.Mock(spec=RepoSyncConduit)
@@ -80,6 +92,7 @@ def get_import_conduit(source_units=None, existing_units=None):
                 continue
             units.append(u)
         return units
+
     def get_units(criteria=None):
         ret_val = []
         if existing_units:
@@ -92,6 +105,7 @@ def get_import_conduit(source_units=None, existing_units=None):
                 else:
                     ret_val.append(u)
         return ret_val
+
     def search_all_units(type_id=None, criteria=None):
         ret_val = []
         if existing_units:
@@ -101,6 +115,7 @@ def get_import_conduit(source_units=None, existing_units=None):
                 elif u.type_id in ["rpm", "srpm"]:
                     ret_val.append(u)
         return ret_val
+
     def save_unit(unit):
         units = []
         return units.append(unit)
@@ -118,7 +133,9 @@ def get_import_conduit(source_units=None, existing_units=None):
     import_conduit.get_repo_scratchpad.side_effect = get_repo_scratchpad
     return import_conduit
 
-def get_upload_conduit(type_id=None, unit_key=None, metadata=None, relative_path=None, pkg_dir=None):
+
+def get_upload_conduit(type_id=None, unit_key=None, metadata=None, relative_path=None,
+                       pkg_dir=None):
     def side_effect(type_id, unit_key, metadata, relative_path):
         if relative_path and pkg_dir:
             relative_path = os.path.join(pkg_dir, relative_path)
@@ -126,10 +143,6 @@ def get_upload_conduit(type_id=None, unit_key=None, metadata=None, relative_path
         return unit
 
     def get_units(criteria=None):
-        ret_units = True
-        if criteria and hasattr(criteria, "type_ids"):
-            if type_id and type_id not in criteria.type_ids:
-                ret_units = False
         return []
 
     upload_conduit = mock.Mock(spec=UploadConduit)
@@ -149,7 +162,9 @@ def get_upload_conduit(type_id=None, unit_key=None, metadata=None, relative_path
 
     return upload_conduit
 
-def get_dependency_conduit(type_id=None, unit_key=None, metadata=None, existing_units=None, relative_path=None, pkg_dir=None):
+
+def get_dependency_conduit(type_id=None, unit_key=None, metadata=None, existing_units=None,
+                           relative_path=None, pkg_dir=None):
     def side_effect(type_id, unit_key, metadata, relative_path):
         if relative_path and pkg_dir:
             relative_path = os.path.join(pkg_dir, relative_path)
@@ -172,7 +187,6 @@ def get_dependency_conduit(type_id=None, unit_key=None, metadata=None, existing_
     def get_repo_scratchpad(repoid=None):
         return {}
 
-
     dependency_conduit = mock.Mock(spec=DependencyResolutionConduit)
     dependency_conduit.get_units = mock.Mock()
     dependency_conduit.get_units.side_effect = get_units
@@ -187,6 +201,7 @@ def get_dependency_conduit(type_id=None, unit_key=None, metadata=None, existing_
 
     return dependency_conduit
 
+
 def get_basic_config(*arg, **kwargs):
     """
 
@@ -195,10 +210,10 @@ def get_basic_config(*arg, **kwargs):
     :return:
     :rtype: pulp.plugins.config.PluginCallConfiguration
     """
-    plugin_config = {"num_retries":0, "retry_delay":0}
+    plugin_config = {"num_retries": 0, "retry_delay": 0}
     repo_plugin_config = {}
     for key in kwargs:
         repo_plugin_config[key] = kwargs[key]
     config = PluginCallConfiguration(plugin_config,
-            repo_plugin_config=repo_plugin_config)
+                                     repo_plugin_config=repo_plugin_config)
     return config
